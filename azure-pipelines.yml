@@ -1,16 +1,22 @@
-# Test pipeline
 trigger:
-- main
+  - master
 
 pool:
-  name: Default
+  name: Default  # Your self-hosted agent pool name
 
 steps:
-- script: |
-    echo "Agent Directory:"
-    cd
-    echo "Python Version:"
-    python --version
-    echo "Python Location:"
-    where python
-  displayName: 'Verify Setup'
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.13.0'  # Specify the exact Python version you want
+      addToPath: true
+
+  - script: python --version
+    displayName: 'Verify Python Version'
+
+  - script: pip --version
+    displayName: 'Verify Pip Version'
+
+  # Run your Python script
+  - script: |
+      python your_script.py
+    displayName: 'Run Python Script'
