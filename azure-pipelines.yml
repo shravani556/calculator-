@@ -2,21 +2,14 @@ trigger:
   - master
 
 pool:
-  name: Default  # Your self-hosted agent pool name
+  name: default  # Replace with your self-hosted agent pool name
 
 steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.13.0'  # Specify the exact Python version you want
-      addToPath: true
-
-  - script: python --version
-    displayName: 'Verify Python Version'
-
-  - script: pip --version
-    displayName: 'Verify Pip Version'
-
-  # Run your Python script
   - script: |
-      python your_script.py
-    displayName: 'Run Python Script'
+      python --version
+      pip --version
+    displayName: 'Verify Python and Pip Installation'
+
+  - script: |
+      python C:\myproject\hello.py  # Adjust to your script path
+    displayName: 'Run Hello Python Script'
