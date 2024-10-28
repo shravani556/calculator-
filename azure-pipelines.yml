@@ -1,13 +1,23 @@
+trigger:
+- master
+
 pool:
-  name: Default  # Use your agent pool name here
+  name: Default  # Ensure this matches your agent pool name
 
 steps:
+- script: |
+    echo "Using Python version:"
+    python --version
+    echo "Using pip version:"
+    pip --version
+  displayName: 'Check Python and Pip Versions'
+
 - script: |
     python -m pip install --upgrade pip
     pip install -r requirements.txt
   displayName: 'Install dependencies'
 
 - script: |
-    pip install pytest pytest-azurepipelines
+    pip install pytest
     pytest
-  displayName: 'Run tests'
+  displayName: 'Run Tests'
