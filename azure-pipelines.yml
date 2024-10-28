@@ -6,6 +6,7 @@ pool:
 
 steps:
 - script: |
+    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
     echo "Using Python version:"
     python --version
     echo "Using pip version:"
@@ -13,11 +14,13 @@ steps:
   displayName: 'Check Python and Pip Versions'
 
 - script: |
+    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
     python -m pip install --upgrade pip
     pip install -r requirements.txt
   displayName: 'Install dependencies'
 
 - script: |
+    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
     pip install pytest
     pytest
   displayName: 'Run Tests'
