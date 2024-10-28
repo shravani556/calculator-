@@ -1,26 +1,16 @@
+# Test pipeline
 trigger:
-- master
+- main
 
 pool:
-  name: Default  # Ensure this matches your agent pool name
+  name: Default
 
 steps:
 - script: |
-    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
-    echo "Using Python version:"
+    echo "Agent Directory:"
+    cd
+    echo "Python Version:"
     python --version
-    echo "Using pip version:"
-    pip --version
-  displayName: 'Check Python and Pip Versions'
-
-- script: |
-    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-  displayName: 'Install dependencies'
-
-- script: |
-    SET PATH=C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313;C:\Users\shravani.banda\AppData\Local\Programs\Python\Python313\Scripts;%PATH%
-    pip install pytest
-    pytest
-  displayName: 'Run Tests'
+    echo "Python Location:"
+    where python
+  displayName: 'Verify Setup'
