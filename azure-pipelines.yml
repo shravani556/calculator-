@@ -1,0 +1,18 @@
+trigger:
+- master  # Adjust based on your branch name if needed
+
+pool:
+  vmImage: 'ubuntu-latest'  # Change to 'windows-latest' if you want to use Windows
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.8'  # Choose the Python version you want to use
+  displayName: 'Use Python 3.8'  # You can change this to your preferred version
+
+- script: |
+    python -m pip install --upgrade pip  # Upgrade pip
+    # If you have a requirements.txt file for dependencies, uncomment the next line
+    # pip install -r requirements.txt
+    python script.py  # Run your Python script
+  displayName: 'Run Python Script'
