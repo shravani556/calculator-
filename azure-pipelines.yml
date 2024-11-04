@@ -2,7 +2,7 @@ trigger:
 - master  # Adjust based on your branch name if needed
 
 pool:
-  vmImage: 'ubuntu-latest'  # Change to 'windows-latest' if you want to use Windows
+  vmImage: 'windows-latest'  # Change to 'windows-latest' if you want to use Windows
 
 steps:
 - task: UsePythonVersion@0
