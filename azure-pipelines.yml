@@ -16,3 +16,42 @@ steps:
     # pip install -r requirements.txt
     python script.py  # Run your Python script
   displayName: 'Run Python Script'
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Header
+printf "\n%-40s %-35s %-25s %-15s %-15s %-20s\n" \
+  "Subscription ID" "Resource Group" "Storage Account" "Blob GB" "File GB" "Total GB"
+printf "%s\n" "$(printf '=%.0s' {1..160})"
+
+# Get all subscriptions
+SUBS=($(az account list --query '[].id' -o tsv))
+
+for SUB in "${SUBS[@]}"; do
+  az account set --subscription "$SUB"
+  az storage account list -o json | jq -c '.[]' | while read -r SA; do
+    name=$(jq -r '.name' <<<"$SA")
+    rg=$(jq -r '.resourceGroup' <<<"$SA")
+
+    blobId="/subscriptions/$SUB/resourceGroups/$rg/providers/Microsoft.Storage/storageAccounts/$name/blobServices/default"
+    fileId="/subscriptions/$SUB/resourceGroups/$rg/providers/Microsoft.Storage/storageAccounts/$name/fileServices/default"
+
+    # Get BlobCapacity
+    blobBytes=$(az monitor metrics list --resource "$blobId" --metrics "BlobCapacity" --interval PT1H -o json |
+      jq -r '.value[0].timeseries[0].data | last | .average // 0')
+
+    # Get FileCapacity
+    fileBytes=$(az monitor metrics list --resource "$fileId" --metrics "FileCapacity" --interval PT1H -o json |
+      jq -r '.value[0].timeseries[0].data | last | .average // 0')
+
+    # Convert to GB
+    blobGB=$(awk "BEGIN {printf \"%.2f\", $blobBytes / (1024*1024*1024)}")
+    fileGB=$(awk "BEGIN {printf \"%.2f\", $fileBytes / (1024*1024*1024)}")
+    totalGB=$(awk "BEGIN {printf \"%.2f\", $blobGB + $fileGB}")
+
+    # Print formatted row
+    printf "%-40s %-35s %-25s %-15s %-15s %-20s\n" \
+      "$SUB" "$rg" "$name" "$blobGB" "$fileGB" "$totalGB"
+  done
+done
