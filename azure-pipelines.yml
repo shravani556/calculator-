@@ -55,3 +55,41 @@ for SUB in "${SUBS[@]}"; do
       "$SUB" "$rg" "$name" "$blobGB" "$fileGB" "$totalGB"
   done
 done
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_TAG_KEYS="${ENV_TAG_KEYS:-Environment,Env,environment,env}"
+IFS=',' read -r -a ENV_KEYS <<<"$ENV_TAG_KEYS"
+
+env_tag(){ local j="$1" v; for k in "${ENV_KEYS[@]}"; do v="$(jq -r --arg k "$k" '.tags[$k] // empty' <<<"$j")"; [[ -n "$v" && "$v" != "null" ]] && { echo "$v"; return; }; done; echo ""; }
+
+echo "subscriptionId,resourceGroup,vmName,location,envTag,osDiskGB,dataDisksGB,totalDisksGB"
+
+if [[ "${SCAN_ALL_SUBS:-0}" == "1" ]]; then SUBS=($(az account list --query '[].id' -o tsv)); else SUBS=($(az account show --query id -o tsv)); fi
+
+for SUB in "${SUBS[@]}"; do
+  az account set --subscription "$SUB" >/dev/null
+  az vm list -o json | jq -c '.[]' | while read -r VM; do
+    vmName="$(jq -r '.name' <<<"$VM")"
+    rg="$(jq -r '.resourceGroup' <<<"$VM")"
+    loc="$(jq -r '.location' <<<"$VM")"
+    env="$(env_tag "$VM")"
+
+    osId="$(jq -r '.storageProfile.osDisk.managedDisk.id // empty' <<<"$VM")"
+    if [[ -n "$osId" ]]; then osGB="$(az disk show --ids "$osId" --query diskSizeGb -o tsv)"; else
+      osGB="$(jq -r '.storageProfile.osDisk.diskSizeGb // 0' <<<"$VM")"; [[ "$osGB" == "null" ]] && osGB=0; fi
+
+    dataTotal=0
+    for did in $(jq -r '.storageProfile.dataDisks[]?.managedDisk.id' <<<"$VM"); do
+      [[ -z "$did" ]] && continue
+      sz="$(az disk show --ids "$did" --query diskSizeGb -o tsv)"
+      dataTotal=$(( dataTotal + ${sz:-0} ))
+    done
+
+    total=$(( osGB + dataTotal ))
+    echo "${SUB},${rg},${vmName},${loc},${env},${osGB},${dataTotal},${total}"
+  done
+done
