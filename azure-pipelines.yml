@@ -93,3 +93,142 @@ for SUB in "${SUBS[@]}"; do
     echo "${SUB},${rg},${vmName},${loc},${env},${osGB},${dataTotal},${total}"
   done
 done
+
+
+
+#!/usr/bin/env bash
+# Collect backup sizes for PostgreSQL (Flexible + Single) and Synapse SQL pools
+# Splits by tags: Environment and LandingZone (vNext/legacy)
+# Requires: az CLI, jq
+
+set -euo pipefail
+
+# ---- Config you can override via env vars ----
+ENV_TAG_KEYS=${ENV_TAG_KEYS:-"Environment,environment,env,Env"}
+LZ_TAG_KEYS=${LZ_TAG_KEYS:-"LandingZone,landingZone,landingzone,lz,LZ"}
+# How far back to look for the latest metric datapoint (PostgreSQL)
+METRIC_LOOKBACK_DAYS=${METRIC_LOOKBACK_DAYS:-1}
+# Cost slice for Synapse backup snapshots (daily window)
+SYNAPSE_USAGE_DAYS=${SYNAPSE_USAGE_DAYS:-1}
+# Output file
+OUT="backup_sizes_$(date -u +%Y%m%dT%H%M%SZ).csv"
+
+START_METRIC=$(date -u -d "${METRIC_LOOKBACK_DAYS} day ago" +%Y-%m-%dT%H:%M:%SZ)
+END_METRIC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+START_USAGE=$(date -u -d "${SYNAPSE_USAGE_DAYS} day ago" +%Y-%m-%d)
+END_USAGE=$(date -u +%Y-%m-%d)
+
+echo "SubscriptionName,SubscriptionId,ResourceId,ResourceType,ResourceGroup,Location,Environment,LandingZone,BackupSize_Bytes,BackupSize_GiB,Method,AsOfUTC" > "$OUT"
+
+lower() { awk '{print tolower($0)}'; }
+
+# Helper: extract first present tag value from a JSON object with .tags
+get_tag() {
+  local json="$1"; local keys_csv="$2"
+  IFS=',' read -r -a keys <<< "$keys_csv"
+  for k in "${keys[@]}"; do
+    local v
+    v=$(jq -r --arg K "$k" '.tags[$K] // empty' <<< "$json")
+    if [[ -n "$v" ]]; then echo "$v"; return 0; fi
+  done
+  echo "unknown"
+}
+
+# Helper: fetch latest Azure Monitor metric value (bytes) for backup_storage_used
+get_pg_backup_bytes() {
+  local rid="$1"
+  local mjson
+  # Uses Azure Monitor metrics list; metric id is 'backup_storage_used' (Bytes). 
+  # Docs: PostgreSQL Flexible & Single Server expose this metric. 
+  mjson=$(az monitor metrics list \
+    --resource "$rid" \
+    --metric backup_storage_used \
+    --aggregation Average \
+    --start-time "$START_METRIC" --end-time "$END_METRIC" --interval PT1H -o json)
+  # pick last non-null value among avg/max/min/total
+  jq -r '.value[0].timeseries[0].data
+         | map(.average // .maximum // .minimum // .total // 0)
+         | last // 0' <<< "$mjson"
+}
+
+bytes_to_gib() { awk -v b="${1:-0}" 'BEGIN{printf "%.2f", (b/1024/1024/1024)}'; }
+
+subs_json=$(az account list --query "[].{id:id,name:name}" -o json)
+
+# Iterate all subscriptions you can see
+for sub in $(jq -c '.[]' <<< "$subs_json"); do
+  subId=$(jq -r '.id' <<< "$sub")
+  subName=$(jq -r '.name' <<< "$sub")
+  az account set -s "$subId"
+
+  # ------------ PostgreSQL: Single Server (legacy) ------------
+  for rid in $(az resource list --resource-type "Microsoft.DBforPostgreSQL/servers" --query "[].id" -o tsv); do
+    rjson=$(az resource show --ids "$rid" -o json)
+    env=$(get_tag "$rjson" "$ENV_TAG_KEYS" | lower)
+    lz=$(get_tag "$rjson" "$LZ_TAG_KEYS" | lower)
+    rg=$(jq -r '.resourceGroup' <<< "$rjson")
+    loc=$(jq -r '.location' <<< "$rjson")
+    rtype=$(jq -r '.type' <<< "$rjson")
+
+    bbytes=$(get_pg_backup_bytes "$rid")
+    bgib=$(bytes_to_gib "$bbytes")
+    echo "$subName,$subId,$rid,$rtype,$rg,$loc,$env,$lz,$bbytes,$bgib,AzureMonitor.backup_storage_used,$END_METRIC" >> "$OUT"
+  done
+
+  # ------------ PostgreSQL: Flexible Server (vNext) ------------
+  for rid in $(az resource list --resource-type "Microsoft.DBforPostgreSQL/flexibleServers" --query "[].id" -o tsv); do
+    rjson=$(az resource show --ids "$rid" -o json)
+    env=$(get_tag "$rjson" "$ENV_TAG_KEYS" | lower)
+    lz=$(get_tag "$rjson" "$LZ_TAG_KEYS" | lower)
+    rg=$(jq -r '.resourceGroup' <<< "$rjson")
+    loc=$(jq -r '.location' <<< "$rjson")
+    rtype=$(jq -r '.type' <<< "$rjson")
+
+    bbytes=$(get_pg_backup_bytes "$rid")
+    bgib=$(bytes_to_gib "$bbytes")
+    echo "$subName,$subId,$rid,$rtype,$rg,$loc,$env,$lz,$bbytes,$bgib,AzureMonitor.backup_storage_used,$END_METRIC" >> "$OUT"
+  done
+
+  # ------------ Synapse dedicated SQL pools ------------
+  # Azure Monitor doesn't provide a backup-size metric for sqlPools; use Cost Management usage details:
+  synIds=$(az resource list --resource-type "Microsoft.Synapse/workspaces/sqlPools" --query "[].id" -o tsv)
+  if [[ -n "${synIds}" ]]; then
+    usage_json=$(az consumption usage list --start-date "$START_USAGE" --end-date "$END_USAGE" --include-meter-details -o json)
+    for rid in $synIds; do
+      rjson=$(az resource show --ids "$rid" -o json)
+      env=$(get_tag "$rjson" "$ENV_TAG_KEYS" | lower)
+      lz=$(get_tag "$rjson" "$LZ_TAG_KEYS" | lower)
+      rg=$(jq -r '.resourceGroup' <<< "$rjson")
+      loc=$(jq -r '.location' <<< "$rjson")
+      rtype=$(jq -r '.type' <<< "$rjson")
+
+      # Sum quantities for meters whose names mention Snapshot/Backup for this resource
+      qty=$(jq --arg id "$rid" '
+         [ .[] 
+           | select(.properties.instanceId==$id)
+           | select( (.properties.meterDetails.meterName|tostring|test("(?i)(snapshot|backup)")) )
+           | .properties.quantity
+         ] | add // 0' <<< "$usage_json")
+
+      uom=$(jq -r --arg id "$rid" '
+         ( [ .[] 
+             | select(.properties.instanceId==$id)
+             | select( (.properties.meterDetails.meterName|tostring|test("(?i)(snapshot|backup)")) )
+           ] | .[0].properties.unitOfMeasure ) // "NA"' <<< "$usage_json")
+
+      # Convert quantity to approximate bytes (handles GB/TB units). If no usage rows, produce 0.
+      if [[ "$uom" =~ TB ]]; then
+        bytes=$(awk -v q="$qty" 'BEGIN{printf "%.0f", q*1024*1024*1024*1024}')
+      elif [[ "$uom" =~ GB ]]; then
+        bytes=$(awk -v q="$qty" 'BEGIN{printf "%.0f", q*1024*1024*1024}')
+      else
+        bytes=0
+      fi
+      bgib=$(bytes_to_gib "$bytes")
+      echo "$subName,$subId,$rid,$rtype,$rg,$loc,$env,$lz,$bytes,$bgib,CostMgmt.SnapshotBackupUsage,$END_USAGE" >> "$OUT"
+    done
+  fi
+done
+
+echo "Wrote: $OUT"
