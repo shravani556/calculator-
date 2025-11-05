@@ -232,3 +232,58 @@ for sub in $(jq -c '.[]' <<< "$subs_json"); do
 done
 
 echo "Wrote: $OUT"
+
+
+
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configure these if your tag keys are different
+ENV_TAG_KEY="${ENV_TAG_KEY:-Environment}"
+LZ_TAG_KEY="${LZ_TAG_KEY:-LandingZone}"
+LOOKBACK_HOURS="${LOOKBACK_HOURS:-24}"
+OUT="${OUT:-backup_sizes_pg_synapse.csv}"
+
+start=$(date -u -d "$LOOKBACK_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)
+end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+echo "subscriptionId,resourceGroup,resourceName,resourceType,environment,landingZone,backupGiB,timestamp" > "$OUT"
+
+subs=$(az account list --query "[].id" -o tsv)
+for sub in $subs; do
+  az account set --subscription "$sub"
+
+  for type in "Microsoft.DBforPostgreSQL/flexibleServers" "Microsoft.DBforPostgreSQL/servers"; do
+    az resource list --resource-type "$type" \
+      --query "[].{id:id,rg:resourceGroup,name:name,type:type,env:tags['$ENV_TAG_KEY'],lz:tags['$LZ_TAG_KEY']}" -o tsv |
+    while IFS=$'\t' read -r id rg name rtype env lz; do
+      # fetch latest backup_storage_used sample; if none, value will be blank
+      line=$(az monitor metrics list --resource "$id" --metric backup_storage_used \
+        --start-time "$start" --end-time "$end" --interval PT1H --aggregation Maximum \
+        --query "value[0].timeseries[0].data[-1].{v:max,ts:timeStamp}" -o tsv 2>/dev/null || true)
+      val=$(echo "$line" | awk '{print $1}')
+      ts=$(echo "$line" | awk '{print $2}')
+      gib=""
+      if [[ -n "${val:-}" ]] && [[ "$val" != "null" ]]; then
+        # bytes -> GiB
+        gib=$(python3 - <<PY
+v=float("$val"); print(round(v/(1024**3),2))
+PY
+)
+      fi
+      echo "$sub,$rg,$name,$rtype,${env:-Unknown},${lz:-Unknown},$gib,$ts" >> "$OUT"
+    done
+  done
+
+  # Synapse Dedicated SQL pools – mark backup size N/A
+  az resource list --resource-type "Microsoft.Synapse/workspaces/sqlPools" \
+    --query "[].{id:id,rg:resourceGroup,name:name,type:type,env:tags['$ENV_TAG_KEY'],lz:tags['$LZ_TAG_KEY']}" -o tsv |
+  while IFS=$'\t' read -r id rg name rtype env lz; do
+    echo "$sub,$rg,$name,$rtype,${env:-Unknown},${lz:-Unknown},,">> "$OUT"
+  done
+done
+
+echo "Wrote $OUT"
