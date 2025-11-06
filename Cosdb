@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="${1:-cosmos_backups.csv}"
+
+err() { printf 'ERROR: %s\n' "$*" >&2; }
+
+# --- checks ---
+if ! command -v az >/dev/null 2>&1; then
+  err "Azure CLI (az) not found. Install https://aka.ms/azcli"
+  exit 1
+fi
+
+if ! az account show >/dev/null 2>&1; then
+  err "No Azure session. Run: az login"
+  exit 1
+fi
+
+SUBS="$(az account list --all --query "[?state=='Enabled'].id" -o tsv || true)"
+if [ -z "$SUBS" ]; then
+  err "No enabled subscriptions visible to this login."
+  exit 1
+fi
+
+printf '%s\n' 'subscriptionId,subscriptionName,resourceGroup,cosmosName,backupType,retentionHours,intervalHours' > "$OUTFILE"
+
+# Loop subscriptions
+printf '%s\n' "$SUBS" | while IFS='' read -r SUB_ID || [ -n "$SUB_ID" ]; do
+  [ -n "$SUB_ID" ] || continue
+
+  SUB_NAME="$(az account show --subscription "$SUB_ID" --query name -o tsv 2>/dev/null || printf '')"
+  printf 'Scanning Cosmos DB accounts in %s (%s)...\n' "${SUB_NAME:-Unknown}" "$SUB_ID"
+
+  COSMOS_TSV="$(az cosmosdb list --subscription "$SUB_ID" \
+    --query "[].{rg:resourceGroup,name:name}" -o tsv 2>/dev/null || true)"
+
+  [ -n "$COSMOS_TSV" ] || continue
+
+  printf '%s\n' "$COSMOS_TSV" | while IFS=$'\t' read -r RG NAME || [ -n "${RG:-}" ]; do
+    [ -n "${RG:-}" ] || continue
+
+    POLICY_JSON="$(az cosmosdb show --subscription "$SUB_ID" -g "$RG" -n "$NAME" --query 'backupPolicy' -o json 2>/dev/null || true)"
+    [ -n "$POLICY_JSON" ] || continue
+
+    TYPE="$(echo "$POLICY_JSON" | jq -r '.type // "Unknown"')"
+    RETENTION="$(echo "$POLICY_JSON" | jq -r '.continuousModeProperties.continuousBackupRetentionIntervalInHours // empty')"
+    INTERVAL="$(echo "$POLICY_JSON" | jq -r '.periodicModeProperties.backupIntervalInMinutes // empty')"
+
+    printf '"%s","%s","%s","%s","%s","%s","%s"\n' \
+      "$SUB_ID" "${SUB_NAME:-}" "$RG" "$NAME" "$TYPE" "${RETENTION:-}" "${INTERVAL:-}" >> "$OUTFILE"
+  done
+done
+
+printf 'Done. Wrote: %s\n' "$OUTFILE"
