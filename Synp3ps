@@ -67,3 +67,52 @@ foreach ($sub in $subscriptions) {
 }
 
 Write-Host "✅ Done. Results written to $outputFile" -ForegroundColor Green
+# =====================================================
+# Synapse Backup Info Script (with safe skip handling)
+# =====================================================
+
+# Output CSV file
+$outputFile = "/home/shravani/synapse_backups.csv"
+
+# Initialize CSV with headers
+"subscriptionId,subscriptionName,resourceGroup,workspaceName,sqlPoolName,actualDataSizeGB,approxBackupSizeGB,restorePointId,restorePointCreationTime" | Out-File -FilePath $outputFile -Encoding utf8
+
+# Get all Synapse Workspaces
+$workspaces = Get-AzSynapseWorkspace
+
+foreach ($ws in $workspaces) {
+
+    Write-Host "`n🔍 Checking workspace: $($ws.Name)" -ForegroundColor Cyan
+
+    # Validate values before proceeding
+    if ([string]::IsNullOrEmpty($ws.ResourceGroupName) -or [string]::IsNullOrEmpty($ws.Name)) {
+        Write-Host "⚠️ Skipping workspace because ResourceGroupName or WorkspaceName is missing: $($ws.Name)" -ForegroundColor Yellow
+        continue
+    }
+
+    try {
+        # Get SQL pools in the workspace
+        $sqlPools = Get-AzSynapseSqlPool -ResourceGroupName $ws.ResourceGroupName -WorkspaceName $ws.Name
+
+        foreach ($sqlPool in $sqlPools) {
+            Write-Host "   → Checking SQL Pool: $($sqlPool.Name)" -ForegroundColor Green
+
+            # Get restore points for each SQL pool
+            $restorePoints = Get-AzSynapseSqlPoolRestorePoint -ResourceGroupName $ws.ResourceGroupName -WorkspaceName $ws.Name -Name $sqlPool.Name
+
+            # Estimate backup size (approx 30% of actual)
+            $actualSizeGB = [math]::Round(($sqlPool.StorageSizeInBytes / 1GB), 2)
+            $approxBackupSizeGB = [math]::Round(($actualSizeGB * 0.3), 2)
+
+            foreach ($restorePoint in $restorePoints) {
+                $line = "$($ws.Id.Split('/')[2]),$($ws.Id.Split('/')[4]),$($ws.ResourceGroupName),$($ws.Name),$($sqlPool.Name),$actualSizeGB,$approxBackupSizeGB,$($restorePoint.RestorePointId),$($restorePoint.RestorePointCreationTime)"
+                Add-Content -Path $outputFile -Value $line
+            }
+        }
+
+    } catch {
+        Write-Host "❌ Error processing workspace $($ws.Name): $_" -ForegroundColor Red
+    }
+}
+
+Write-Host "`n✅ Done. Results written to $outputFile" -ForegroundColor Cyan
