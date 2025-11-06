@@ -1,0 +1,2 @@
+$ws = Get-AzSynapseWorkspace -Name "a00001-synapsewkspw3-ctd" -ResourceGroupName "a00001-namespacew3-ctd"
+Get-AzSynapseSqlPool -ResourceGroupName $ws.ResourceGroupName -WorkspaceName $ws.Name
