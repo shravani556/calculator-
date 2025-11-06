@@ -1,0 +1,69 @@
+# -------------------------------------------------------------
+# Script: synapse_backup_with_actual_size.ps1
+# Purpose: Lists Synapse Dedicated SQL pools, their restore points,
+#          and the *actual* data size used (GB)
+# -------------------------------------------------------------
+
+# Connect to Azure
+Connect-AzAccount
+
+# Output file
+$outputFile = "synapse_backups.csv"
+"subscriptionId,subscriptionName,resourceGroup,workspaceName,sqlPoolName,actualDataSizeGB,approxBackupSizeGB,restorePointId,restorePointCreationTime" | Out-File -FilePath $outputFile
+
+# Get all subscriptions
+$subscriptions = Get-AzSubscription
+
+foreach ($sub in $subscriptions) {
+    Write-Host "Scanning Synapse Workspaces in subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+
+    $workspaces = Get-AzSynapseWorkspace
+
+    foreach ($ws in $workspaces) {
+        Write-Host " -> Checking workspace: $($ws.Name)" -ForegroundColor Yellow
+        $pools = Get-AzSynapseSqlPool -ResourceGroupName $ws.ResourceGroupName -WorkspaceName $ws.Name
+
+        foreach ($pool in $pools) {
+            Write-Host "    Checking pool: $($pool.Name)"
+
+            # ---- Get actual data size ----
+            try {
+                $usage = Get-AzSynapseSqlPoolUsage -ResourceGroupName $ws.ResourceGroupName `
+                                                   -WorkspaceName $ws.Name `
+                                                   -Name $pool.Name `
+                                                   -ErrorAction Stop
+                $storageUsedBytes = ($usage | Where-Object { $_.Name.Value -eq "StorageUsed" }).CurrentValue
+                $actualDataSizeGB = [math]::Round($storageUsedBytes / 1GB, 2)
+            }
+            catch {
+                Write-Host "      Could not fetch usage metrics (no data or insufficient permission)." -ForegroundColor DarkGray
+                $actualDataSizeGB = 0
+            }
+
+            # ---- Estimate backup size (roughly 1.1x actual data) ----
+            $approxBackupSizeGB = [math]::Round($actualDataSizeGB * 1.1, 2)
+
+            # ---- Get restore points (backups) ----
+            $restorePoints = Get-AzSynapseSqlPoolRestorePoint `
+                                -ResourceGroupName $ws.ResourceGroupName `
+                                -WorkspaceName $ws.Name `
+                                -SqlPoolName $pool.Name `
+                                -ErrorAction SilentlyContinue
+
+            if ($restorePoints) {
+                foreach ($rp in $restorePoints) {
+                    "$($sub.Id),$($sub.Name),$($ws.ResourceGroupName),$($ws.Name),$($pool.Name),$actualDataSizeGB,$approxBackupSizeGB,$($rp.RestorePointId),$($rp.RestorePointCreationTime)" |
+                        Out-File -FilePath $outputFile -Append
+                }
+            }
+            else {
+                "No restore points found." | Write-Host -ForegroundColor DarkGray
+                "$($sub.Id),$($sub.Name),$($ws.ResourceGroupName),$($ws.Name),$($pool.Name),$actualDataSizeGB,$approxBackupSizeGB,," |
+                    Out-File -FilePath $outputFile -Append
+            }
+        }
+    }
+}
+
+Write-Host "✅ Done. Results written to $outputFile" -ForegroundColor Green
