@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="${1:-synapse_backups.csv}"
+
+echo 'subscriptionId,subscriptionName,resourceGroup,workspaceName,sqlPoolName,backupType,databaseSizeGB,approxBackupSizeGB' > "$OUTFILE"
+
+# Check prerequisites
+if ! command -v az >/dev/null 2>&1; then
+  echo "Azure CLI not found. Install it first: https://aka.ms/azcli" >&2
+  exit 1
+fi
+
+if ! az account show >/dev/null 2>&1; then
+  echo "You must be logged in. Run: az login" >&2
+  exit 1
+fi
+
+SUBS=$(az account list --all --query "[?state=='Enabled'].id" -o tsv)
+if [ -z "$SUBS" ]; then
+  echo "No subscriptions found." >&2
+  exit 1
+fi
+
+for SUB_ID in $SUBS; do
+  SUB_NAME=$(az account show --subscription "$SUB_ID" --query name -o tsv)
+  echo "Scanning Synapse Workspaces in subscription: $SUB_NAME ($SUB_ID)"
+
+  WORKSPACES=$(az synapse workspace list --subscription "$SUB_ID" --query "[].{rg:resourceGroup,name:name}" -o tsv || true)
+  [ -n "$WORKSPACES" ] || continue
+
+  while IFS=$'\t' read -r RG WS || [ -n "${WS:-}" ]; do
+    [ -n "$WS" ] || continue
+    echo "  Checking workspace: $WS"
+
+    POOLS=$(az synapse sql pool list --subscription "$SUB_ID" --resource-group "$RG" --workspace-name "$WS" --query "[].name" -o tsv || true)
+    [ -n "$POOLS" ] || continue
+
+    for POOL in $POOLS; do
+      echo "     Checking pool: $POOL"
+
+      # Detect Backup Type (Geo or None)
+      BACKUP_TYPE="None"
+      GEO_POLICY=$(az synapse sql pool show \
+        --subscription "$SUB_ID" \
+        --resource-group "$RG" \
+        --workspace-name "$WS" \
+        --name "$POOL" \
+        --query "geoBackupPolicy" -o tsv 2>/dev/null || true)
+
+      if [[ "$GEO_POLICY" == *"Enabled"* ]]; then
+        BACKUP_TYPE="Geo"
+      elif [[ "$GEO_POLICY" == *"Disabled"* ]]; then
+        BACKUP_TYPE="Local"
+      fi
+
+      # Get DB size
+      DB_SIZE_BYTES=$(az synapse sql pool show \
+        --subscription "$SUB_ID" \
+        --resource-group "$RG" \
+        --workspace-name "$WS" \
+        --name "$POOL" \
+        --query "maxSizeBytes" -o tsv 2>/dev/null || echo 0)
+
+      DB_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $DB_SIZE_BYTES / (1024^3)}")
+      APPROX_BACKUP_GB=$(awk "BEGIN {printf \"%.2f\", $DB_SIZE_GB * 0.30}")
+
+      echo "\"$SUB_ID\",\"$SUB_NAME\",\"$RG\",\"$WS\",\"$POOL\",\"$BACKUP_TYPE\",$DB_SIZE_GB,$APPROX_BACKUP_GB" >> "$OUTFILE"
+    done
+  done <<< "$WORKSPACES"
+done
+
+echo "Done. Results written to $OUTFILE"
