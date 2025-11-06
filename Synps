@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="${1:-synapse_backups.csv}"
+
+# CSV header
+echo 'subscriptionId,subscriptionName,resourceGroup,workspaceName,sqlPoolName,restorePointId,restorePointCreationTime,backupRetentionHours,databaseSizeGB,approxBackupSizeGB' > "$OUTFILE"
+
+# Check login
+if ! az account show >/dev/null 2>&1; then
+  echo "Please run: az login" >&2
+  exit 1
+fi
+
+# Get all enabled subscriptions
+SUBS=$(az account list --all --query "[?state=='Enabled'].id" -o tsv)
+
+for SUB in $SUBS; do
+  SUB_NAME=$(az account show --subscription "$SUB" --query name -o tsv)
+  echo "Scanning Synapse Workspaces in subscription: $SUB_NAME ($SUB)"
+
+  WORKSPACES=$(az synapse workspace list --subscription "$SUB" --query "[].{rg:resourceGroup,name:name}" -o tsv)
+  [ -z "$WORKSPACES" ] && continue
+
+  while IFS=$'\t' read -r RG WS_NAME; do
+    echo "  -> Checking workspace: $WS_NAME"
+
+    # List dedicated SQL pools
+    POOLS=$(az synapse sql pool list --subscription "$SUB" --resource-group "$RG" --workspace-name "$WS_NAME" --query "[].name" -o tsv)
+    [ -z "$POOLS" ] && continue
+
+    while IFS= read -r POOL; do
+      echo "     Checking pool: $POOL"
+
+      # Query pool properties
+      POOL_JSON=$(az synapse sql pool show \
+        --subscription "$SUB" \
+        --resource-group "$RG" \
+        --workspace-name "$WS_NAME" \
+        --name "$POOL" -o json 2>/dev/null || echo "{}")
+
+      # Extract data
+      SIZE_BYTES=$(echo "$POOL_JSON" | jq -r '.storageSize // 0')
+      MAX_SIZE_BYTES=$(echo "$POOL_JSON" | jq -r '.maxSizeBytes // 0')
+
+      # Convert to GB
+      DB_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $MAX_SIZE_BYTES / (1024*1024*1024)}")
+      BACKUP_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $SIZE_BYTES / (1024*1024*1024)}")
+
+      # Get restore points
+      RESTORE_POINTS=$(az synapse sql pool restore-point list \
+        --subscription "$SUB" \
+        --resource-group "$RG" \
+        --workspace-name "$WS_NAME" \
+        --name "$POOL" \
+        --query "[].{id:restorePointId,time:restorePointCreationTime}" -o tsv 2>/dev/null || true)
+
+      if [ -z "$RESTORE_POINTS" ]; then
+        echo "       No restore points found."
+        continue
+      fi
+
+      while IFS=$'\t' read -r RP_ID RP_TIME; do
+        echo "\"$SUB\",\"$SUB_NAME\",\"$RG\",\"$WS_NAME\",\"$POOL\",\"$RP_ID\",\"$RP_TIME\",\"168\",\"$DB_SIZE_GB\",\"$BACKUP_SIZE_GB\"" >> "$OUTFILE"
+      done <<< "$RESTORE_POINTS"
+    done <<< "$POOLS"
+  done <<< "$WORKSPACES"
+done
+
+echo "Done. Results written to $OUTFILE"
