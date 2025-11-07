@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# List Azure Insights resources across all enabled subscriptions
+# - Application Insights components
+# - Log Analytics workspaces
+#
+# Usage:
+#   chmod +x list-azure-insights.sh
+#   ./list-azure-insights.sh | column -t -s '|'
+
+set -euo pipefail
+
+TENANT_ID="${TENANT_ID:-5ac4936b-1ac4-4e57-9e2b-48673491865e}"
+MGMT_SCOPE="https://management.azure.com//.default"
+
+need_login() {
+  if ! az account show >/dev/null 2>&1; then
+    return 0
+  fi
+  # Also verify we can get a management token (MFA/scope issues show up here)
+  if ! az account get-access-token --scope "$MGMT_SCOPE" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+ensure_login() {
+  if need_login; then
+    echo "Not authenticated (or missing management scope). Launching az login..." >&2
+    # Prefer interactive browser; fall back to device code if it fails (e.g., headless or blocked)
+    if ! az login --tenant "$TENANT_ID"; then
+      echo "Falling back to device-code flow..." >&2
+      az login --tenant "$TENANT_ID" --use-device-code
+    fi
+    # Validate scope for management endpoint (helps with Conditional Access)
+    az account get-access-token --scope "$MGMT_SCOPE" >/dev/null
+  fi
+}
+
+main() {
+  if ! command -v az >/dev/null 2>&1; then
+    echo "ERROR: Azure CLI (az) not found." >&2
+    exit 1
+  fi
+
+  ensure_login
+
+  echo "subscriptionId|subscriptionName|resourceType|name|resourceGroup|location|kind|workspaceResourceId"
+
+  # Enumerate only Enabled subscriptions
+  subs="$(az account list --query "[?state=='Enabled'].[id,name]" -o tsv)"
+  if [[ -z "${subs}" ]]; then
+    echo "No Enabled subscriptions found under tenant ${TENANT_ID}." >&2
+    exit 0
+  fi
+
+  while IFS=$'\t' read -r sid sname; do
+    # Application Insights components
+    az resource list \
+      --subscription "$sid" \
+      --resource-type "microsoft.insights/components" \
+      --query "[].{type:type,name:name,resourceGroup:resourceGroup,location:location,kind:kind,workspaceResourceId:properties.WorkspaceResourceId}" \
+      -o tsv \
+    | awk -v sid="$sid" -v sname="$sname" 'BEGIN{FS="\t";OFS="|"}{print sid,sname,$1,$2,$3,$4,$5,$6}'
+
+    # Log Analytics workspaces
+    az resource list \
+      --subscription "$sid" \
+      --resource-type "microsoft.operationalinsights/workspaces" \
+      --query "[].{type:type,name:name,resourceGroup:resourceGroup,location:location,kind:kind,workspaceResourceId:id}" \
+      -o tsv \
+    | awk -v sid="$sid" -v sname="$sname" 'BEGIN{FS="\t";OFS="|"}{print sid,sname,$1,$2,$3,$4,$5,$6}'
+  done <<< "$subs"
+}
+
+main "$@"
