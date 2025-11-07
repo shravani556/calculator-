@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Azure Synapse (Dedicated SQL Pools) inventory + backups across all subscriptions
+# Outputs into current directory (UTC timestamped):
+#   - synapse_inventory_<ts>.json                    (per workspace/pool JSON)
+#   - synapse_inventory_<ts>.csv                     (per workspace/pool CSV)
+#   - synapse_restore_points_<ts>.csv                (per pool: restore points)
+#   - synapse_geo_policies_<ts>.csv                  (per pool: geo-backup policy)
+#   - synapse_recoverable_sql_pools_<ts>.csv         (per workspace: recoverable (geo) backups)
+#
+# READ-ONLY: Uses az synapse list/show + az rest GET (no changes to resources).
+#
+# References:
+# - List restore points:  GET .../workspaces/{ws}/sqlPools/{pool}/restorePoints?api-version=2021-06-01
+# - Geo-backup policy:    GET .../workspaces/{ws}/sqlPools/{pool}/geoBackupPolicies/Default?api-version=2021-06-01
+# - Recoverable pools:    GET .../workspaces/{ws}/recoverableSqlPools?api-version=2021-06-01
+#
+# Docs: https://learn.microsoft.com/en-us/rest/api/synapse/resourcemanager/sql-pool-restore-points/list
+#       https://learn.microsoft.com/en-us/rest/api/synapse/resourcemanager/sql-pool-geo-backup-policies/get
+#       https://learn.microsoft.com/en-us/rest/api/synapse/resourcemanager/workspace-managed-sql-server-recoverable-sql-pools/list
+
+API_VERSION="2021-06-01"
+
+# ---------- options ----------
+# Set to 0 to skip the (workspace-level) recoverable SQL pools export
+WITH_RECOVERABLE="${WITH_RECOVERABLE:-1}"
+# -----------------------------
+
+command -v az >/dev/null 2>&1 || { echo "az CLI not found. Install Azure CLI first."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq not found. Install with: brew install jq"; exit 1; }
+
+# Ensure required extension (no-op if already present)
+az extension show -n synapse       >/dev/null 2>&1 || az extension add -n synapse       >/dev/null 2>&1 || true
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+OUT_JSON="synapse_inventory_${timestamp}.json"
+OUT_CSV="synapse_inventory_${timestamp}.csv"
+RP_CSV="synapse_restore_points_${timestamp}.csv"
+GEO_CSV="synapse_geo_policies_${timestamp}.csv"
+REC_CSV="synapse_recoverable_sql_pools_${timestamp}.csv"
+
+# Initialize outputs
+echo '[]' > "$OUT_JSON"
+echo "subscriptionName,subscriptionId,resourceGroup,workspace,sqlPool,location,sku,state,geoBackupStorage,geoBackupPolicyState,restorePointsCount,earliestRestorePointUTC,latestRestorePointUTC" > "$OUT_CSV"
+echo "subscriptionName,subscriptionId,resourceGroup,workspace,sqlPool,restorePointName,restorePointType,restorePointLabel,creationTimeUTC,location,restorePointId" > "$RP_CSV"
+echo "subscriptionName,subscriptionId,resourceGroup,workspace,sqlPool,geoPolicyState,storageType" > "$GEO_CSV"
+echo "subscriptionName,subscriptionId,resourceGroup,workspace,recoverableName,edition,serviceLevelObjective,lastAvailableBackupDate" > "$REC_CSV"
+
+# Helpers
+append_json () {
+  local rec_json="$1"
+  local tmp="$(mktemp)"
+  jq --argjson rec "$rec_json" '. += [$rec]' "$OUT_JSON" > "$tmp" && mv "$tmp" "$OUT_JSON"
+}
+
+az_json () {
+  if out="$(az "$@" -o json 2>/dev/null)"; then
+    echo "$out"
+  else
+    echo '[]'
+  fi
+}
+
+az_rest_json () {
+  # Usage: az_rest_json "<URI>"
+  local uri="$1"
+  if out="$(az rest --method get --uri "$uri" -o json 2>/dev/null)"; then
+    echo "$out"
+  else
+    # Standardize to {"value":[]}
+    echo '{"value":[]}'
+  fi
+}
+
+echo "Collecting subscriptions..."
+subs_tsv="$(az account list --all --query "[].{id:id,name:name}" -o tsv || true)"
+if [ -z "$subs_tsv" ]; then
+  echo "No subscriptions visible to the current account."
+  exit 0
+fi
+
+echo "$subs_tsv" | while IFS=$'\t' read -r subId subName; do
+  [ -n "$subId" ] || continue
+  az account set -s "$subId" >/dev/null
+  echo
+  echo "==> Scanning subscription: $subName ($subId)"
+
+  # Workspaces in this subscription
+  wss="$(az_json synapse workspace list)"
+  echo "$wss" | jq -c '.[]' | while read -r ws; do
+    [ -n "$ws" ] || continue
+    rg="$(jq -r '.resourceGroup' <<<"$ws")"
+    wsname="$(jq -r '.name' <<<"$ws")"
+    wslocation="$(jq -r '.location' <<<"$ws")"
+
+    echo "  -> Workspace: $wsname (rg: $rg)"
+
+    # Dedicated SQL pools in the workspace
+    pools="$(az_json synapse sql pool list -g "$rg" --workspace-name "$wsname")"
+    echo "$pools" | jq -c '.[]' | while read -r p; do
+      [ -n "$p" ] || continue
+      poolname="$(jq -r '.name' <<<"$p")"
+      location="$(jq -r '.location // empty' <<<"$p")"
+      # Get full details so we can extract SKU/state robustly
+      p_show="$(az_json synapse sql pool show -g "$rg" --workspace-name "$wsname" -n "$poolname")"
+      sku="$(jq -r '.sku.name // .sku // empty' <<<"$p_show")"
+      state="$(jq -r '.state // .properties.status // empty' <<<"$p_show")"
+
+      # ---- Restore points (automatic & user-defined) ----
+      rp_uri="https://management.azure.com/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.Synapse/workspaces/${wsname}/sqlPools/${poolname}/restorePoints?api-version=${API_VERSION}"
+      rp_json="$(az_rest_json "$rp_uri")"
+      rp_count="$(jq -r '(.value // []) | length' <<<"$rp_json")"
+      rp_earliest="$(jq -r '(.value // [] | map(.properties.restorePointCreationDate) | min) // ""' <<<"$rp_json")"
+      rp_latest="$(jq -r '(.value // [] | map(.properties.restorePointCreationDate) | max) // ""' <<<"$rp_json")"
+
+      # Export all restore points for this pool
+      jq -r --arg subName "$subName" --arg subId "$subId" \
+            --arg rg "$rg" --arg ws "$wsname" --arg pool "$poolname" '
+        (.value // [])[] | [
+          $subName,$subId,$rg,$ws,$pool,
+          (.name // ""),
+          (.properties.restorePointType // ""),
+          (.properties.restorePointLabel // ""),
+          (.properties.restorePointCreationDate // ""),
+          (.location // ""),
+          (.id // "")
+        ] | @csv' <<<"$rp_json" >> "$RP_CSV"
+
+      # ---- Geo-backup policy (Enabled/Disabled, storage type) ----
+      geo_uri="https://management.azure.com/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.Synapse/workspaces/${wsname}/sqlPools/${poolname}/geoBackupPolicies/Default?api-version=${API_VERSION}"
+      geo_json="$(az_rest_json "$geo_uri")"
+      geo_state="$(jq -r '.properties.state // ""' <<<"$geo_json")"
+      geo_storage="$(jq -r '.properties.storageType // ""' <<<"$geo_json")"
+
+      echo "\"$subName\",\"$subId\",\"$rg\",\"$wsname\",\"$poolname\",\"$location\",\"$sku\",\"$state\",\"$geo_storage\",\"$geo_state\",\"$rp_count\",\"$rp_earliest\",\"$rp_latest\"" >> "$OUT_CSV"
+      echo "\"$subName\",\"$subId\",\"$rg\",\"$wsname\",\"$poolname\",\"$geo_state\",\"$geo_storage\"" >> "$GEO_CSV"
+
+      # JSON record (one per pool)
+      rec="$(jq -n \
+        --arg subName "$subName" --arg subId "$subId" --arg rg "$rg" \
+        --arg workspace "$wsname" --arg pool "$poolname" \
+        --arg location "$location" --arg sku "$sku" --arg state "$state" \
+        --arg geo_state "$geo_state" --arg geo_storage "$geo_storage" \
+        --arg rp_count "$rp_count" --arg rp_earliest "$rp_earliest" --arg rp_latest "$rp_latest" '
+        {
+          subscriptionName:$subName, subscriptionId:$subId, resourceGroup:$rg,
+          workspace:$workspace, sqlPool:$pool, location:$location, sku:$sku, state:$state,
+          geoBackupPolicy:{state:$geo_state, storageType:$geo_storage},
+          restorePoints:{count:($rp_count|tonumber),
+                         earliestUTC:($rp_earliest // null),
+                         latestUTC:($rp_latest // null)}
+        }')"
+      append_json "$rec"
+    done
+
+    # ---- Recoverable SQL pools (workspace-level geo backups) ----
+    if [ "$WITH_RECOVERABLE" = "1" ]; then
+      rec_uri="https://management.azure.com/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.Synapse/workspaces/${wsname}/recoverableSqlPools?api-version=${API_VERSION}"
+      rec_json="$(az_rest_json "$rec_uri")"
+      jq -r --arg subName "$subName" --arg subId "$subId" --arg rg "$rg" --arg ws "$wsname" '
+        (.value // [])[] | [
+          $subName,$subId,$rg,$ws,
+          (.name // ""),
+          (.properties.edition // ""),
+          (.properties.serviceLevelObjective // ""),
+          (.properties.lastAvailableBackupDate // "")
+        ] | @csv' <<<"$rec_json" >> "$REC_CSV"
+    fi
+
+  done
+done
+
+echo
+echo "Wrote:"
+echo "  Inventory JSON : $OUT_JSON"
+echo "  Inventory CSV  : $OUT_CSV"
+echo "  Restore points : $RP_CSV"
+echo "  Geo policies   : $GEO_CSV"
+if [ "$WITH_RECOVERABLE" = "1" ]; then
+  echo "  Recoverables   : $REC_CSV"
+fi
+
+echo
+echo "Sample (inventory CSV, top 20 rows):"
+awk 'NR==1 || NR<=21' "$OUT_CSV" | sed -e 's/^/  /'
