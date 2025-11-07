@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Azure PostgreSQL Inventory (servers, databases, backups) across all subscriptions
+# macOS/Bash 3.2 compatible (no mapfile). Also works from zsh if invoked with: bash script.sh
+# Outputs: JSON + CSV in current directory.
+
+# ---------- options ----------
+WITH_RECOVERY_POINTS="${WITH_RECOVERY_POINTS:-1}"  # 1: also query latest Azure Backup recovery point (slower); 0: skip for speed
+# --------------------------------
+
+command -v az >/dev/null 2>&1 || { echo "az CLI not found. Install Azure CLI first."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq not found. Install with: brew install jq"; exit 1; }
+
+# Ensure required extensions are present (non-interactive)
+# If already installed, commands are no-ops; if not, they'll be installed quietly.
+az extension show -n rdbms           >/dev/null 2>&1 || az extension add -n rdbms           >/dev/null 2>&1 || true
+az extension show -n dataprotection  >/dev/null 2>&1 || az extension add -n dataprotection  >/dev/null 2>&1 || true
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_JSON="postgres_inventory_${timestamp}.json"
+OUT_CSV="postgres_inventory_${timestamp}.csv"
+
+# Initialize outputs
+echo '[]' > "$OUT_JSON"
+echo "subscriptionName,subscriptionId,resourceGroup,type,serverOrCluster,database,location,version,fqdnOrCoordinator,retentionDays,geoBackup,earliestRestore,ondemandBackupsCount,ltrBackupsCount,azureBackupProtected,azureBackupVault,latestRecoveryPointUTC" > "$OUT_CSV"
+
+# Helper: append a record to the JSON array file
+append_json () {
+  rec_json="$1"
+  tmp="$(mktemp)"
+  jq --argjson rec "$rec_json" '. += [$rec]' "$OUT_JSON" > "$tmp" && mv "$tmp" "$OUT_JSON"
+}
+
+# Helper: AZ call that returns [] on error instead of exiting the script
+az_json () {
+  if out="$(az "$@" -o json 2>/dev/null)"; then
+    echo "$out"
+  else
+    echo '[]'
+  fi
+}
+
+echo "Collecting subscriptions..."
+subs_tsv="$(az account list --all --query "[].{id:id,name:name}" -o tsv || true)"
+
+if [ -z "$subs_tsv" ]; then
+  echo "No subscriptions visible to the current account."
+  exit 0
+fi
+
+# Read each subscription line-by-line (tab-separated id + name)
+echo "$subs_tsv" | while IFS=$'\t' read -r subId subName; do
+  [ -n "$subId" ] || continue
+  az account set -s "$subId" >/dev/null
+  echo
+  echo "==> Scanning subscription: $subName ($subId)"
+
+  # Pull Azure Backup protection maps once per subscription
+  DP_FLEX_JSON="$(az_json dataprotection backup-instance list-from-resourcegraph --datasource-type AzureDatabaseForPostgreSQLFlexibleServer --subscriptions "$subId")"
+  DP_SS_JSON="$(az_json dataprotection backup-instance list-from-resourcegraph --datasource-type AzureDatabaseForPostgreSQL --subscriptions "$subId")"
+
+  # ---------- Flexible Servers ----------
+  flex_list="$(az_json postgres flexible-server list)"
+  echo "$flex_list" | jq -c '.[]' | while read -r f; do
+    rg="$(jq -r '.resourceGroup' <<<"$f")"
+    name="$(jq -r '.name' <<<"$f")"
+    location="$(jq -r '.location' <<<"$f")"
+
+    f_show="$(az_json postgres flexible-server show -g "$rg" -n "$name")"
+    version="$(jq -r '.version // empty' <<<"$f_show")"
+    fqdn="$(jq -r '.fullyQualifiedDomainName // empty' <<<"$f_show")"
+    retention="$(jq -r '.backupRetentionDays // empty' <<<"$f_show")"
+    georb="$(jq -r '.geoRedundantBackup // empty' <<<"$f_show")"
+    earliest="$(jq -r '.backupInfo.earliestRestoreDate // empty' <<<"$f_show")"
+
+    dbs="$(az_json postgres flexible-server db list -g "$rg" -s "$name")"
+    backups="$(az_json postgres flexible-server backup list -g "$rg" -n "$name")"
+    ltr="$(az_json postgres flexible-server long-term-retention list -g "$rg" -n "$name")"
+
+    ondemandCount="$(jq '[.[] | select((.backupType // "") | ascii_downcase | test("on[- ]?demand|customer on[- ]?demand"))] | length' <<<"$backups" 2>/dev/null || echo 0)"
+    ltrCount="$(jq 'length' <<<"$ltr" 2>/dev/null || echo 0)"
+
+    echo "$dbs" | jq -r '.[].name' | while IFS= read -r dbname; do
+      [ -n "$dbname" ] || continue
+      dbResourceId="/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${name}/databases/${dbname}"
+
+      # Azure Backup mapping for this DB
+      dp_match="$(jq -c --arg id "$dbResourceId" '[.[] | select(.properties.dataSourceInfo.resourceID==$id)]' <<<"$DP_FLEX_JSON")"
+      dp_protected="No"
+      dp_vault=""
+      latest_rp=""
+
+      if [ "$(jq 'length' <<<"$dp_match")" -gt 0 ]; then
+        dp_protected="Yes"
+        dp_first="$(jq -c '.[0]' <<<"$dp_match")"
+        dp_vault="$(jq -r '.vaultName' <<<"$dp_first")"
+        if [ "$WITH_RECOVERY_POINTS" = "1" ]; then
+          dp_name="$(jq -r '.name' <<<"$dp_first")"
+          dp_rg="$(jq -r '.resourceGroup' <<<"$dp_first")"
+          rp_list="$(az_json dataprotection recovery-point list --backup-instance-name "$dp_name" -g "$dp_rg" --vault-name "$dp_vault")"
+          latest_rp="$(jq -r '[.[] | .properties.recoveryPointTime] | max // empty' <<<"$rp_list")"
+        fi
+      fi
+
+      # CSV
+      echo "\"$subName\",\"$subId\",\"$rg\",\"FlexibleServer\",\"$name\",\"$dbname\",\"$location\",\"$version\",\"$fqdn\",\"$retention\",\"$georb\",\"$earliest\",\"$ondemandCount\",\"$ltrCount\",\"$dp_protected\",\"$dp_vault\",\"$latest_rp\"" >> "$OUT_CSV"
+
+      # JSON
+      rec="$(jq -n --arg subName "$subName" --arg subId "$subId" --arg rg "$rg" --arg type "FlexibleServer" \
+                 --arg server "$name" --arg db "$dbname" --arg location "$location" --arg version "$version" --arg fqdn "$fqdn" \
+                 --arg retention "$retention" --arg georb "$georb" --arg earliest "$earliest" \
+                 --arg ond "$ondemandCount" --arg ltrc "$ltrCount" \
+                 --arg dp "$dp_protected" --arg dpv "$dp_vault" --arg lrp "$latest_rp" \
+                 '{subscriptionName:$subName, subscriptionId:$subId, resourceGroup:$rg, type:$type,
+                   server:$server, database:$db, location:$location, version:$version, fqdn:$fqdn,
+                   nativeBackup:{retentionDays:$retention, geoBackup:$georb, earliestRestore:$earliest,
+                                 onDemandBackupsCount:($ond|tonumber), ltrBackupsCount:($ltrc|tonumber)},
+                   azureBackup:{protected:($dp=="Yes"), vault:$dpv, latestRecoveryPointUTC:($lrp // null)}}')"
+      append_json "$rec"
+    done
+  done
+
+  # ---------- Single Server (legacy) ----------
+  ss_list="$(az_json postgres server list)"
+  echo "$ss_list" | jq -c '.[]' | while read -r s; do
+    rg="$(jq -r '.resourceGroup' <<<"$s")"
+    name="$(jq -r '.name' <<<"$s")"
+    location="$(jq -r '.location' <<<"$s")"
+    version="$(jq -r '.version // empty' <<<"$s")"
+    fqdn="$(jq -r '.fullyQualifiedDomainName // empty' <<<"$s")"
+
+    s_show="$(az_json postgres server show -g "$rg" -n "$name")"
+    retention="$(jq -r '.storageProfile.backupRetentionDays // .backupRetentionDays // empty' <<<"$s_show")"
+    georb="$(jq -r '.storageProfile.geoRedundantBackup // .geoRedundantBackup // empty' <<<"$s_show")"
+    earliest="$(jq -r '.earliestRestoreDate // empty' <<<"$s_show")"
+    if [ -z "$earliest" ]; then
+      s_arm="$(az_json resource show --ids "/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.DBforPostgreSQL/servers/${name}")"
+      earliest="$(jq -r '.properties.earliestRestoreDate // empty' <<<"$s_arm")"
+    fi
+
+    dbs="$(az_json postgres db list -g "$rg" -s "$name")"
+    echo "$dbs" | jq -r '.[].name' | while IFS= read -r dbname; do
+      [ -n "$dbname" ] || continue
+      dbResourceId="/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.DBforPostgreSQL/servers/${name}/databases/${dbname}"
+
+      dp_match="$(jq -c --arg id "$dbResourceId" '[.[] | select(.properties.dataSourceInfo.resourceID==$id)]' <<<"$DP_SS_JSON")"
+      dp_protected="No"
+      dp_vault=""
+      latest_rp=""
+      if [ "$(jq 'length' <<<"$dp_match")" -gt 0 ]; then
+        dp_protected="Yes"
+        dp_first="$(jq -c '.[0]' <<<"$dp_match")"
+        dp_vault="$(jq -r '.vaultName' <<<"$dp_first")"
+        if [ "$WITH_RECOVERY_POINTS" = "1" ]; then
+          dp_name="$(jq -r '.name' <<<"$dp_first")"
+          dp_rg="$(jq -r '.resourceGroup' <<<"$dp_first")"
+          rp_list="$(az_json dataprotection recovery-point list --backup-instance-name "$dp_name" -g "$dp_rg" --vault-name "$dp_vault")"
+          latest_rp="$(jq -r '[.[] | .properties.recoveryPointTime] | max // empty' <<<"$rp_list")"
+        fi
+      fi
+
+      echo "\"$subName\",\"$subId\",\"$rg\",\"SingleServer\",\"$name\",\"$dbname\",\"$location\",\"$version\",\"$fqdn\",\"$retention\",\"$georb\",\"$earliest\",\"\",\"\",\"$dp_protected\",\"$dp_vault\",\"$latest_rp\"" >> "$OUT_CSV"
+
+      rec="$(jq -n --arg subName "$subName" --arg subId "$subId" --arg rg "$rg" --arg type "SingleServer" \
+                 --arg server "$name" --arg db "$dbname" --arg location "$location" --arg version "$version" --arg fqdn "$fqdn" \
+                 --arg retention "$retention" --arg georb "$georb" --arg earliest "$earliest" \
+                 --arg dp "$dp_protected" --arg dpv "$dp_vault" --arg lrp "$latest_rp" \
+                 '{subscriptionName:$subName, subscriptionId:$subId, resourceGroup:$rg, type:$type,
+                   server:$server, database:$db, location:$location, version:$version, fqdn:$fqdn,
+                   nativeBackup:{retentionDays:$retention, geoBackup:$georb, earliestRestore:$earliest},
+                   azureBackup:{protected:($dp=="Yes"), vault:$dpv, latestRecoveryPointUTC:($lrp // null)}}')"
+      append_json "$rec"
+    done
+  done
+
+  # ---------- Cosmos DB for PostgreSQL clusters ----------
+  clusters="$(az_json resource list --resource-type Microsoft.DBforPostgreSQL/serverGroupsv2)"
+  echo "$clusters" | jq -c '.[]' | while read -r c; do
+    rg="$(jq -r '.resourceGroup' <<<"$c")"
+    name="$(jq -r '.name' <<<"$c")"
+    location="$(jq -r '.location' <<<"$c")"
+    c_show="$(az_json resource show --ids "/subscriptions/${subId}/resourceGroups/${rg}/providers/Microsoft.DBforPostgreSQL/serverGroupsv2/${name}" --api-version 2023-03-02-preview)"
+    version="$(jq -r '.properties.postgresqlVersion // empty' <<<"$c_show")"
+    coordinatorVCores="$(jq -r '.properties.coordinatorVCores // empty' <<<"$c_show")"
+    geoBackup="$(jq -r '.properties.enableGeoBackup // empty' <<<"$c_show")"
+    earliest="$(jq -r '.properties.earliestRestoreOn // .properties.earliestRestoreTime // empty' <<<"$c_show")"
+
+    echo "\"$subName\",\"$subId\",\"$rg\",\"CosmosPgCluster\",\"$name\",\"(n/a)\",\"$location\",\"$version\",\"coordinatorVCores=${coordinatorVCores}\",\"\",\"$geoBackup\",\"$earliest\",\"\",\"\",\"\",\"\",\"\"" >> "$OUT_CSV"
+
+    rec="$(jq -n --arg subName "$subName" --arg subId "$subId" --arg rg "$rg" --arg type "CosmosPgCluster" \
+               --arg cluster "$name" --arg location "$location" --arg version "$version" \
+               --arg geo "$geoBackup" --arg earliest "$earliest" --arg vcores "$coordinatorVCores" \
+               '{subscriptionName:$subName, subscriptionId:$subId, resourceGroup:$rg, type:$type,
+                 cluster:$cluster, location:$location, version:$version,
+                 nativeBackup:{geoBackup:$geo, earliestRestore:$earliest},
+                 clusterDetails:{coordinatorVCores:$vcores}}')"
+    append_json "$rec"
+  done
+
+done
+
+echo
+echo "Wrote:"
+echo "  JSON: $OUT_JSON"
+echo "  CSV : $OUT_CSV"
+echo
+echo "Top 20 rows:"
+awk 'NR==1 || NR<=21' "$OUT_CSV" | sed -e 's/^/  /'
