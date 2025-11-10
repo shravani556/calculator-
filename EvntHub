@@ -1,0 +1,23 @@
+What is the default fallback if not configured?
+Event Hubs features & terminology (retention behavior)
+Log compaction / retention modes
+What are other configurable methods? (monitoring, exports, etc.)
+Monitor Event Hubs with Azure Monitor
+Monitoring data reference for Event Hubs (metrics & logs)
+Using DR service
+Event Hubs Geo‑replication (BCDR)
+Event Hubs Geo‑disaster recovery (alias‑based)
+Relocate Event Hubs to another region
+Dumping the configurations to a file
+Export or capture your current configuration:
+Export template (Azure portal)
+Export template (PowerShell)
+Decompile exported ARM JSON to Bicep
+Useful resource type references:
+ARM/Bicep reference: Microsoft.EventHub/namespaces
+ARM/Bicep reference: Microsoft.EventHub/namespaces/eventhubs
+ARM/Bicep reference: Microsoft.EventHub/namespaces/disasterRecoveryConfigs
+Quickstart: Create event hub with ARM template
+Status Metrics
+Monitor Event Hubs with Azure Monitor
+Supported metrics – Microsoft.EventHub/Namespaces
