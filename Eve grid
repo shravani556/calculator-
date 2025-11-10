@@ -1,0 +1,7 @@
+	Create a workspace‑based Application Insights resource
+	Manage data retention defaults (workspace&table‑level)
+	Workspace soft‑delete and recovery
+What are other configurable methods? (Export, Retention, Query, Metrics)
+1.	Data export / streaming
+	Log Analytics workspace data export (to Storage/Event Hubs)
+	Data export – Azure CLI
