@@ -1,0 +1,73 @@
+General
+Description
+Are there any default backups available? (official docs)
+Manage data retention in a Log Analytics workspace
+Log Analytics workspace overview (where App Insights stores data)
+Delete and recover an Azure Log Analytics workspace (soft delete)
+What is the default fallback if nothing is configured?
+Create a workspace‑based Application Insights resource
+Manage data retention defaults (workspace & table‑level)
+Workspace soft‑delete and recovery
+What are other configurable methods? (Export, Retention, Query, Metrics)
+Data export / streaming
+Log Analytics workspace data export (to Storage/Event Hubs)
+Data export – Azure CLI
+Data export – PowerShell
+Workspace data export – FAQ / troubleshooting
+Diagnostic settings (route resource logs/metrics)
+Stream Azure Monitor data to Event Hubs
+Immutable storage (container‑level WORM policies)
+Immutable storage overview
+Retention, archive & retrieval
+Manage retention (interactive + long‑term/archive)
+Search jobs (query archived data)
+Restore (rehydrate a time range for hot queries)
+APIs & scheduled exports
+Log Analytics Query REST API
+Run Log Analytics queries – Azure CLI
+Invoke‑AzOperationalInsightsQuery – PowerShell
+Export logs to Storage using Logic Apps (scheduled exports)
+Azure Monitor Logs connector for Logic Apps (reference)
+Metrics (export & analysis)
+Metrics data platform overview
+Export metrics via Data Collection Rules (Preview)
+Diagnostic settings (metrics & logs routing)
+Using DR service
+Log Analytics Workspace Replication (cross‑region DR)
+Azure CLI – workspace failover/failback/replication
+Azure region pairs (DR background)
+Azure Storage redundancy options (LRS/ZRS/GRS/GZRS)
+Storage disaster‑recovery guidance
+Dumping the configurations to a file
+Export templates from the Azure portal (ARM/Bicep)
+Export templates with PowerShell
+Decompile ARM JSON to Bicep
+Workbooks – automate with ARM (export/import)
+Save a log query
+Query packs (share/export queries across workspaces)
+Create alert rules with CLI/PowerShell/ARM
+Diagnostic settings – ARM samples
+Using IaC
+Key Azure Resource Manager (ARM/Bicep) reference types for monitoring assets:
+Application Insights component (Microsoft.Insights/components)
+Workbooks (Microsoft.Insights/workbooks)
+Diagnostic settings (Microsoft.Insights/diagnosticSettings)
+Scheduled query rules – log alerts (Microsoft.Insights/scheduledQueryRules)
+Metric alerts (Microsoft.Insights/metricAlerts)
+Data Collection Rules (Microsoft.Insights/dataCollectionRules)
+Data Collection Rule Associations
+Log Analytics workspaces (Microsoft.OperationalInsights/workspaces)
+Workspace tables (Microsoft.OperationalInsights/workspaces/tables)
+Workspace data exports (Microsoft.OperationalInsights/workspaces/dataExports)
+Saved searches (Microsoft.OperationalInsights/workspaces/savedSearches)
+Linked storage accounts
+Query packs (Microsoft.OperationalInsights/queryPacks)
+Status Metrics
+Application Insights metrics overview
+Azure Monitor metrics – data platform
+Metrics Explorer (analyze metrics)
+Export metrics via Data Collection Rules (Preview)
+Metrics REST API – List
+Metrics Batch REST API
+Supported metrics index
+Diagnostic settings (configure export of metrics/logs)
