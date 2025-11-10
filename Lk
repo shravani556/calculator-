@@ -1,0 +1,31 @@
+Are there any default backups available? (official docs)
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure?tabs=portal-3%2Cportal-1%2Cportal-2
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/log-analytics-workspace-overview
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace?tabs=azure-portal
+
+What is the default fallback if nothing is configured?
+https://learn.microsoft.com/en-us/azure/azure-monitor/app/create-workspace-resource?tabs=portal
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure?tabs=portal-3%2Cportal-1%2Cportal-2
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace?tabs=azure-portal
+
+What are other configurable methods? (Export, Retention, Query, Metrics)
+1. Data export / streaming
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-data-export?tabs=portal
+https://learn.microsoft.com/en-us/cli/azure/monitor/log-analytics/workspace/data-export?view=azure-cli-latest
+https://learn.microsoft.com/en-us/powershell/module/az.operationalinsights/new-azoperationalinsightsdataexport?view=azps-14.6.0
+
+2. Retention, archive & retrieval
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure?tabs=portal-3%2Cportal-1%2Cportal-2
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/search-jobs?tabs=portal-1%2Cportal-2
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/restore?tabs=api-1
+
+3. APIs & scheduled exports
+
+https://learn.microsoft.com/en-us/azure/azure-monitor/logs/api/overview
+https://learn.microsoft.com/en-us/cli/azure/monitor/log-analytics?view=azure-cli-latest
+https://learn.microsoft.com/en-us/powershell/module/az.operationalinsights/invoke-azoperationalinsightsquery?view=azps-14.6.0
+
+4) Metrics (export & analysis)
+https://learn.microsoft.com/en-us/azure/azure-monitor/metrics/data-platform-metrics
+https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-metrics
+https://learn.microsoft.com/en-us/azure/azure-monitor/platform/diagnostic-settings?tabs=portal
