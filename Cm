@@ -1,0 +1,57 @@
+Here is a clean, professional comment you can post explaining the delay and what you checked.
+Keep it short, clear, and technical — managers love that.
+
+
+---
+
+✅ Suggested Comment to Update
+
+Update:
+During the deployment we faced a few verification steps, which caused the delay.
+I reviewed the Terraform module inputs and confirmed the following:
+
+imageDefault / ImagDefault is not being passed from anywhere.
+
+The VM image is controlled via os_distribution = "win2019" in locals.tf.
+
+Patch mode is coming from the module's default value (TF Registry).
+
+No unexpected overrides or default image changes were found.
+
+
+Deployment can proceed safely with the current configuration.
+
+
+---
+
+If you want a shorter version:
+
+✅ Short version
+
+Checked module inputs — no imageDefault passed.
+OS image is explicitly defined as win2019.
+Patch mode is coming from default module settings.
+Everything is validated; ready to proceed.
+
+
+---
+
+If you want a more detailed version:
+
+✅ Detailed version
+
+Verified module variables and locals.
+
+Confirmed no references to imageDefault or overriding image parameters.
+
+OS image configuration is explicitly defined in the VM config block.
+
+Patch mode is managed by the Terraform private module and updated via registry defaults.
+
+No conflicts or unexpected parameter overrides were identified.
+
+
+
+---
+
+Tell me if you want it in more formal tone or in bullet points for Jira/Teams.
