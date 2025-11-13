@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Azure VM disk inventory (read-only).
+# Outputs:
+#   - vm_disks_detail.csv  (one row per disk: OS + data)
+#   - vm_disks_summary.csv (one row per VM: OS sum, data sum, total)
+#
+# Usage:
+#   bash vm.sh [output_dir] [comma_separated_subscription_ids]
+# Examples:
+#   bash vm.sh out
+#   bash vm.sh out "sub1,sub2"
+
+set -euo pipefail
+
+OUTDIR="${1:-azure-vm-disk-sizes-$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$OUTDIR"
+
+SUBS_ARG="${2:-}"
+if [[ -z "$SUBS_ARG" ]]; then
+  # Include ALL subscriptions to avoid "Use --all" warning
+  SUBS="$(az account list --all --query "[].id" -o tsv | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/[[:space:]]$//')"
+else
+  SUBS="$(echo "$SUBS_ARG" | tr ',' ' ' | sed 's/[[:space:]]\+/ /g; s/[[:space:]]$//')"
+fi
+if [[ -z "${SUBS:-}" ]]; then
+  echo "No subscriptions resolved. Check your login or the subscription list." >&2
+  exit 1
+fi
+
+command -v az >/dev/null || { echo "Azure CLI (az) is required"; exit 1; }
+command -v jq >/dev/null || { echo "jq is required"; exit 1; }
+az extension add --name resource-graph >/dev/null 2>&1 || true
+
+echo "Writing CSVs to: $OUTDIR" >&2
+echo "Subscriptions: $SUBS" >&2
+
+# ------------------------- CSV headers -------------------------
+DETAIL_CSV="$OUTDIR/vm_disks_detail.csv"
+SUMMARY_CSV="$OUTDIR/vm_disks_summary.csv"
+echo "subscriptionId,resourceGroup,location,environment,vmName,diskName,isOS,diskSizeGiB" > "$DETAIL_CSV"
+echo "subscriptionId,resourceGroup,location,environment,vmName,osDiskGiB,dataDisksGiB,totalGiB" > "$SUMMARY_CSV"
+
+# ------------------------- Helper: write JSON array to CSVs -------------------------
+write_from_json() {
+  local json="$1"
+  # detail
+  echo "$json" | jq -r '
+    .detail[]? | [
+      .subscriptionId, .resourceGroup, .location, (.environment // ""),
+      .vmName, .diskName, (if .isOS then "true" else "false" end), (.diskSizeGiB // 0)
+    ] | @csv
+  ' >> "$DETAIL_CSV"
+  # summary
+  echo "$json" | jq -r '
+    .summary[]? | [
+      .subscriptionId, .resourceGroup, .location, (.environment // ""),
+      .vmName, (.osDiskGiB // 0), (.dataDisksGiB // 0), (.totalGiB // 0)
+    ] | @csv
+  ' >> "$SUMMARY_CSV"
+}
+
+# ------------------------- Fast path: Resource Graph -------------------------
+kql() {
+  local query="$1"
+  local page=1000
+  local skip=0
+  local tmp; tmp="$(mktemp)"; : > "$tmp"
+  while :; do
+    set +e
+    local batch rc
+    batch="$(az graph query --subscriptions $SUBS --first "$page" --skip "$skip" -q "$query" -o json --query "data" 2>/dev/null)"
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 || -z "$batch" ]]; then break; fi
+    local count
+    count="$(echo "$batch" | jq 'length')"
+    [[ "$count" -eq 0 ]] && break
+    echo "$batch" | jq -c '.[]' >> "$tmp"
+    skip=$((skip + page))
+    [[ "$count" -lt $page ]] && break
+  done
+  if [[ -s "$tmp" ]]; then jq -s '.' "$tmp"; else echo '[]'; fi
+  rm -f "$tmp"
+}
+
+DETAIL_KQL=$(cat <<'KQL'
+let vms = Resources
+| where type =~ 'microsoft.compute/virtualmachines'
+| project subscriptionId, resourceGroup, location, vmId=id, vmName=name, tags,
+          osMdId = tostring(properties.storageProfile.osDisk.managedDisk.id),
+          osSizeFromVm = toint(properties.storageProfile.osDisk.diskSizeGB),
+          dataDisks = properties.storageProfile.dataDisks;
+let os_disk = vms
+| project-away dataDisks
+| join kind=leftouter (
+    Resources
+    | where type =~ 'microsoft.compute/disks'
+    | project diskId=id, diskSizeGiB=toint(properties.diskSizeGB)
+) on $left.osMdId == $right.diskId
+| extend environment = coalesce(tostring(tags.Environment), tostring(tags.environment), tostring(tags.Env), tostring(tags.env))
+| extend diskName = iif(isempty(osMdId), "ephemeral-or-unmanaged-os", tostring(split(osMdId,'/')[10]))
+| extend sizeGiB = toint(coalesce(diskSizeGiB, osSizeFromVm, 0))
+| project subscriptionId, resourceGroup, location, environment, vmName, diskName, isOS=bool(true), diskSizeGiB=sizeGiB;
+let data_disks = vms
+| mv-expand dd = dataDisks to typeof(dynamic)
+| extend ddMdId = tostring(dd.managedDisk.id),
+         ddSizeFromVm = toint(dd.diskSizeGB)
+| join kind=leftouter (
+    Resources
+    | where type =~ 'microsoft.compute/disks'
+    | project diskId=id, diskSizeGiB=toint(properties.diskSizeGB)
+) on $left.ddMdId == $right.diskId
+| extend environment = coalesce(tostring(tags.Environment), tostring(tags.environment), tostring(tags.Env), tostring(tags.env))
+| extend diskName = iif(isempty(ddMdId), "unmanaged-data-disk", tostring(split(ddMdId,'/')[10]))
+| extend sizeGiB = toint(coalesce(diskSizeGiB, ddSizeFromVm, 0))
+| project subscriptionId, resourceGroup, location, environment, vmName, diskName, isOS=bool(false), diskSizeGiB=sizeGiB;
+union os_disk, data_disks
+| where diskSizeGiB >= 0
+KQL
+)
+
+SUMMARY_KQL=$(cat <<'KQL'
+let vms = Resources
+| where type =~ 'microsoft.compute/virtualmachines'
+| project subscriptionId, resourceGroup, location, vmId=id, vmName=name, tags;
+let detail = (
+  let vms_base = Resources
+  | where type =~ 'microsoft.compute/virtualmachines'
+  | project subscriptionId, resourceGroup, location, vmId=id, vmName=name, tags,
+            osMdId = tostring(properties.storageProfile.osDisk.managedDisk.id),
+            osSizeFromVm = toint(properties.storageProfile.osDisk.diskSizeGB),
+            dataDisks = properties.storageProfile.dataDisks;
+  let os_disk = vms_base
+  | project-away dataDisks
+  | join kind=leftouter (
+      Resources
+      | where type =~ 'microsoft.compute/disks'
+      | project diskId=id, diskSizeGiB=toint(properties.diskSizeGB)
+    ) on $left.osMdId == $right.diskId
+  | extend sizeGiB = toint(coalesce(diskSizeGiB, osSizeFromVm, 0))
+  | project vmId, isOS=bool(true), diskSizeGiB=sizeGiB;
+  let data_disks = vms_base
+  | mv-expand dd = dataDisks to typeof(dynamic)
+  | extend ddMdId = tostring(dd.managedDisk.id),
+           ddSizeFromVm = toint(dd.diskSizeGB)
+  | join kind=leftouter (
+      Resources
+      | where type =~ 'microsoft.compute/disks'
+      | project diskId=id, diskSizeGiB=toint(properties.diskSizeGB)
+    ) on $left.ddMdId == $right.diskId
+  | extend sizeGiB = toint(coalesce(diskSizeGiB, ddSizeFromVm, 0))
+  | project vmId, isOS=bool(false), diskSizeGiB=sizeGiB;
+  union os_disk, data_disks
+);
+vms
+| join kind=leftouter (
+    detail
+    | summarize osDiskGiB = sumif(diskSizeGiB, isOS),
+                dataDisksGiB = sumif(diskSizeGiB, not(isOS)) by vmId
+  ) on vmId
+| extend environment = coalesce(tostring(tags.Environment), tostring(tags.environment), tostring(tags.Env), tostring(tags.env))
+| extend osDiskGiB = toint(coalesce(osDiskGiB, 0)),
+         dataDisksGiB = toint(coalesce(dataDisksGiB, 0)),
+         totalGiB = osDiskGiB + dataDisksGiB
+| project subscriptionId, resourceGroup, location, environment, vmName, osDiskGiB, dataDisksGiB, totalGiB
+KQL
+)
+
+# Run ARG; if 0 VMs, fall back to CLI method
+ARG_SUMMARY_COUNT="$(kql "Resources | where type =~ 'microsoft.compute/virtualmachines' | summarize c=count()" | jq -r '.[0].c // 0' || echo 0)"
+
+if [[ "$ARG_SUMMARY_COUNT" -gt 0 ]]; then
+  # ARG path
+  DETAIL_JSON="$(kql "$DETAIL_KQL")"
+  SUMMARY_JSON="$(kql "$SUMMARY_KQL")"
+  COMBINED="$(jq -n --argjson d "$DETAIL_JSON" --argjson s "$SUMMARY_JSON" '{detail:$d, summary:$s}')"
+  write_from_json "$COMBINED"
+else
+  echo "Resource Graph returned 0 VMs. Falling back to per-subscription CLI (slower)..." >&2
+
+  # ------------- CLI fallback per subscription -------------
+  for SUB in $SUBS; do
+    echo "Processing subscription: $SUB" >&2
+    az account set --subscription "$SUB"
+
+    # Get all VMs and all managed disks in this subscription
+    VMS_JSON="$(az vm list -o json 2>/dev/null || echo '[]')"
+    DISKS_JSON="$(az disk list -o json 2>/dev/null || echo '[]')"
+
+    # Build map of diskId -> sizeGiB
+    DISK_MAP="$(echo "$DISKS_JSON" | jq -c 'map({( .id ): ( .diskSizeGb // .diskSizeGB // .properties.diskSizeGB // 0)}) | add // {}')"
+
+    # Detail rows
+    echo "$VMS_JSON" | jq -rc --arg sub "$SUB" --argjson dmap "$DISK_MAP" '
+      .[] as $vm
+      | {
+          subscriptionId: $sub,
+          resourceGroup: ($vm.resourceGroup // ($vm.id | split("/")[4])),
+          location: $vm.location,
+          vmName: $vm.name,
+          env: ($vm.tags.Environment // $vm.tags.environment // $vm.tags.Env // $vm.tags.env // null),
+          os: $vm.storageProfile.osDisk,
+          data: ($vm.storageProfile.dataDisks // [])
+        }
+      | (
+          # OS disk
+          {
+            subscriptionId, resourceGroup, location,
+            environment: .env, vmName,
+            diskName: (if (.os.managedDisk.id // "") == "" then "ephemeral-or-unmanaged-os" else (.os.managedDisk.id | split("/")[10]) end),
+            isOS: true,
+            diskSizeGiB: (
+              ($dmap[.os.managedDisk.id] // .os.diskSizeGb // .os.diskSizeGB // 0)
+            )
+          }
+        ),
+        (
+          # Data disks
+          .data[]? as $dd
+          | {
+              subscriptionId, resourceGroup, location,
+              environment: .env, vmName,
+              diskName: (if ($dd.managedDisk.id // "") == "" then "unmanaged-data-disk" else ($dd.managedDisk.id | split("/")[10]) end),
+              isOS: false,
+              diskSizeGiB: (
+                ($dmap[$dd.managedDisk.id] // $dd.diskSizeGb // $dd.diskSizeGB // 0)
+              )
+            }
+        )
+    ' | jq -r '
+      [
+        .subscriptionId, .resourceGroup, .location, (.environment // ""),
+        .vmName, .diskName, (if .isOS then "true" else "false" end), (.diskSizeGiB // 0)
+      ] | @csv
+    ' >> "$DETAIL_CSV"
+
+    # Summary rows (per VM)
+    echo "$VMS_JSON" | jq -rc --arg sub "$SUB" --argjson dmap "$DISK_MAP" '
+      .[] as $vm
+      | {
+          subscriptionId: $sub,
+          resourceGroup: ($vm.resourceGroup // ($vm.id | split("/")[4])),
+          location: $vm.location,
+          vmName: $vm.name,
+          env: ($vm.tags.Environment // $vm.tags.environment // $vm.tags.Env // $vm.tags.env // null),
+          os: $vm.storageProfile.osDisk,
+          data: ($vm.storageProfile.dataDisks // [])
+        }
+      | {
+          subscriptionId, resourceGroup, location, environment: .env, vmName,
+          osDiskGiB: (
+            ($dmap[.os.managedDisk.id] // .os.diskSizeGb // .os.diskSizeGB // 0)
+          ),
+          dataDisksGiB: (
+            ( [ .data[]
+                | ($dmap[.managedDisk.id] // .diskSizeGb // .diskSizeGB // 0)
+              ] | add ) // 0
+          )
+        }
+      | .totalGiB = ((.osDiskGiB // 0) + (.dataDisksGiB // 0))
+    ' | jq -r '
+      [
+        .subscriptionId, .resourceGroup, .location, (.environment // ""),
+        .vmName, (.osDiskGiB // 0), (.dataDisksGiB // 0), (.totalGiB // 0)
+      ] | @csv
+    ' >> "$SUMMARY_CSV"
+
+  done
+fi
+
+echo "Done. Files created in: $OUTDIR"
+ls -1 "$OUTDIR"/*.csv || true
