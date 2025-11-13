@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# Enumerate: Subscriptions -> Resource Groups -> VMs -> Disks (OS + Data)
+# Outputs:
+#   - vm_disks_detail.csv  (one row per disk attached to a VM)
+#   - vm_disks_summary.csv (one row per VM with totals)
+#
+# Usage:
+#   bash vm_full_inventory.sh [output_dir] [comma_separated_subscription_ids]
+#   # CHUNK_SIZE defaults to 20; override via env: CHUNK_SIZE=25 bash vm_full_inventory.sh ...
+#
+# Notes:
+# - Processes subscriptions in batches of CHUNK_SIZE (default 20).
+# - Skips any RG whose VM list JSON contains unescaped control characters.
+# - Uses a sanitizer to strip ASCII control chars before jq.
+
+set -euo pipefail
+
+OUTDIR="${1:-azure-vm-inventory-$(date -u +%Y%m%dT%H%M%SZ)}"
+mkdir -p "$OUTDIR"
+
+DETAIL_CSV="$OUTDIR/vm_disks_detail.csv"
+SUMMARY_CSV="$OUTDIR/vm_disks_summary.csv"
+CHUNK_SIZE="${CHUNK_SIZE:-20}"
+
+# Sanitizer: remove ASCII control characters (U+0000..U+001F)
+strip_ctrl() { tr -d '\000-\031'; }
+
+SUBS_ARG="${2:-}"
+if [[ -z "$SUBS_ARG" ]]; then
+  SUBS="$(az account list --all --query "[].id" -o tsv --only-show-errors | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/[[:space:]]$//')"
+else
+  SUBS="$(printf '%s' "$SUBS_ARG" | tr ',' ' ' | sed 's/[[:space:]]\+/ /g; s/[[:space:]]$//')"
+fi
+
+if [[ -z "${SUBS:-}" ]]; then
+  echo "No subscriptions resolved. Run 'az login' or pass subscription IDs." >&2
+  exit 1
+fi
+
+command -v az >/dev/null || { echo "Azure CLI (az) is required"; exit 1; }
+command -v jq >/dev/null || { echo "jq is required"; exit 1; }
+
+echo "Writing CSVs to: $OUTDIR"
+echo "Subscriptions: $SUBS" >&2
+echo "Batch size (CHUNK_SIZE): $CHUNK_SIZE" >&2
+
+# CSV headers
+echo "subscriptionId,resourceGroup,location,vmName,vmId,diskName,diskId,isOS,managed,ephemeral,diskSizeGiB" > "$DETAIL_CSV"
+echo "subscriptionId,resourceGroup,location,vmName,vmId,osDiskGiB,dataDisksGiB,totalGiB" > "$SUMMARY_CSV"
+
+build_disk_map_file() {
+  local sub="$1" map_file="$2"
+  az disk list --subscription "$sub" -o json --only-show-errors 2>/dev/null \
+  | strip_ctrl \
+  | jq -c '(map({( .id ): {size: (.diskSizeGb // .properties.diskSizeGB // 0), state: (.diskState // .properties.diskState // "Unknown") }}) | add) // {}' \
+  > "$map_file" || echo '{}' > "$map_file"
+}
+
+# Turn SUBS string into array for chunking
+read -r -a SUB_ARR <<< "$SUBS"
+TOTAL_SUBS=${#SUB_ARR[@]}
+
+batch=0
+for ((start=0; start<TOTAL_SUBS; start+=CHUNK_SIZE)); do
+  ((batch++))
+  end=$(( start + CHUNK_SIZE ))
+  if (( end > TOTAL_SUBS )); then end=$TOTAL_SUBS; fi
+  echo "=== Batch $batch: subscriptions $((start+1))..$end of $TOTAL_SUBS ===" >&2
+
+  for ((i=start; i<end; i++)); do
+    SUB="${SUB_ARR[i]}"
+    echo "== Subscription: $SUB" >&2
+    az account set --subscription "$SUB"
+
+    DISK_MAP_FILE="$(mktemp)"
+    build_disk_map_file "$SUB" "$DISK_MAP_FILE"
+
+    RGS="$(az group list --subscription "$SUB" --query "[].name" -o tsv --only-show-errors 2>/dev/null | tr '\n' ' ' || true)"
+    if [[ -z "$RGS" ]]; then
+      echo "   (no resource groups)" >&2
+      rm -f "$DISK_MAP_FILE"
+      continue
+    fi
+
+    for RG in $RGS; do
+      echo "  -- Resource Group: $RG" >&2
+
+      # Pull VM list JSON, sanitize, and validate.
+      VMS_JSON="$(az vm list --subscription "$SUB" -g "$RG" -o json --only-show-errors 2>/dev/null || echo '[]')"
+      if ! printf '%s' "$VMS_JSON" | strip_ctrl | jq -e . >/dev/null 2>&1; then
+        echo "     !! Skipping RG '$RG' due to invalid JSON (likely control chars)" >&2
+        continue
+      fi
+
+      # ---------- DETAIL rows (one per disk) ----------
+      printf '%s' "$VMS_JSON" \
+      | strip_ctrl \
+      | jq -rc --arg SUB "$SUB" --arg RG "$RG" --slurpfile dmap "$DISK_MAP_FILE" '
+          .[] as $vm
+          | {
+              subscriptionId: $SUB,
+              resourceGroup: $RG,
+              location: ($vm.location // "unknown"),
+              vmName: $vm.name,
+              vmId: ($vm.id // ""),
+              os: ($vm.storageProfile.osDisk // {}),
+              data: ($vm.storageProfile.dataDisks // [])
+            }
+          | (
+              {
+                subscriptionId, resourceGroup, location, vmName, vmId,
+                diskId: ($vm.storageProfile.osDisk.managedDisk.id // null),
+                diskName: (
+                  if ($vm.storageProfile.osDisk.managedDisk.id // "") == "" then
+                    ($vm.storageProfile.osDisk.name // "ephemeral-or-unmanaged-os")
+                  else
+                    ($vm.storageProfile.osDisk.managedDisk.id | split("/")[10])
+                  end
+                ),
+                isOS: true,
+                managed: ((($vm.storageProfile.osDisk.managedDisk.id // "") != "") ),
+                ephemeral: ((($vm.storageProfile.osDisk.diffDiskSettings.option // "") | ascii_downcase) == "local"),
+                diskSizeGiB: (
+                  ( $dmap[0][$vm.storageProfile.osDisk.managedDisk.id].size
+                    // $vm.storageProfile.osDisk.diskSizeGb
+                    // $vm.storageProfile.osDisk.diskSizeGB
+                    // 0 )
+                )
+              }
+            ),
+            (
+              .data[]? as $dd
+              | {
+                  subscriptionId, resourceGroup, location, vmName, vmId,
+                  diskId: ($dd.managedDisk.id // null),
+                  diskName: (
+                    if ($dd.managedDisk.id // "") == "" then
+                      ($dd.name // "unmanaged-data-disk")
+                    else
+                      ($dd.managedDisk.id | split("/")[10])
+                    end
+                  ),
+                  isOS: false,
+                  managed: ((($dd.managedDisk.id // "") != "") ),
+                  ephemeral: false,
+                  diskSizeGiB: (
+                    ( $dmap[0][$dd.managedDisk.id].size
+                      // $dd.diskSizeGb
+                      // $dd.diskSizeGB
+                      // 0 )
+                  )
+                }
+            )
+        ' \
+      | jq -r '
+          [
+            .subscriptionId, .resourceGroup, .location, .vmName, .vmId,
+            .diskName, (.diskId // ""), (if .isOS then "true" else "false" end),
+            (if .managed then "true" else "false" end),
+            (if .ephemeral then "true" else "false" end),
+            (.diskSizeGiB // 0)
+          ] | @csv
+        ' >> "$DETAIL_CSV" || {
+          echo "     !! DETAIL generation failed for RG '$RG' (continuing)" >&2
+        }
+
+      # ---------- SUMMARY rows (one per VM) ----------
+      printf '%s' "$VMS_JSON" \
+      | strip_ctrl \
+      | jq -rc --arg SUB "$SUB" --arg RG "$RG" --slurpfile dmap "$DISK_MAP_FILE" '
+          .[] as $vm
+          | {
+              subscriptionId: $SUB,
+              resourceGroup: $RG,
+              location: ($vm.location // "unknown"),
+              vmName: $vm.name,
+              vmId: ($vm.id // ""),
+              os: ($vm.storageProfile.osDisk // {}),
+              data: ($vm.storageProfile.dataDisks // [])
+            }
+          | {
+              subscriptionId, resourceGroup, location, vmName, vmId,
+              osDiskGiB: (
+                ( $dmap[0][$vm.storageProfile.osDisk.managedDisk.id].size
+                  // $vm.storageProfile.osDisk.diskSizeGb
+                  // $vm.storageProfile.osDisk.diskSizeGB
+                  // 0 )
+              ),
+              dataDisksGiB: (
+                ( [ .data[]
+                    | ( $dmap[0][.managedDisk.id].size // .diskSizeGb // .diskSizeGB // 0 )
+                  ] | add ) // 0
+              )
+            }
+          | .totalGiB = ((.osDiskGiB // 0) + (.dataDisksGiB // 0))
+        ' \
+      | jq -r '
+          [
+            .subscriptionId, .resourceGroup, .location, .vmName, .vmId,
+            (.osDiskGiB // 0), (.dataDisksGiB // 0), (.totalGiB // 0)
+          ] | @csv
+        ' >> "$SUMMARY_CSV" || {
+          echo "     !! SUMMARY generation failed for RG '$RG' (continuing)" >&2
+        }
+
+    done # RG loop
+
+    rm -f "$DISK_MAP_FILE"
+  done # subs in batch
+done # batches
+
+echo "Done. Files created in: $OUTDIR"
+ls -1 "$OUTDIR"/*.csv
