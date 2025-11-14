@@ -1,0 +1,31 @@
+Azure Resources Backup & DR Analysis - Complete Details
+
+Resource Type Default Backup Retention Period Backup Frequency PITR Capable Azure Backup Available Other Backup Methods Geo-Replication DR Capable MSFT Documentation
+API Management ❌ No N/A N/A ❌ No ❌ No ARM Template Export Configuration Backup Manual Snapshots ✅ Yes (Premium) ✅ Yes https://docs.microsoft.com/en-us/azure/api-management/api-management-howto-disaster-recovery-backup-restore
+Application Insights ❌ No 90 days N/A ❌ No ❌ No Data Export to Storage Log Analytics Export Continuous Export ❌ No ❌ No https://docs.microsoft.com/en-us/azure/azure-monitor/logs/logs-data-export
+App Services ✅ Yes Indefinite Automatic hourly ✅ Yes ✅ Yes Custom Backups to Storage ARM Templates Git Deployment ❌ No ✅ Yes https://docs.microsoft.com/en-us/azure/app-service/manage-backup
+Event Grid Topics ❌ No Transient N/A ❌ No ❌ No Dead Letter Storage ARM Template Export Multiple Subscriptions ✅ Yes (Manual) ✅ Yes https://docs.microsoft.com/en-us/azure/event-grid/geo-disaster-recovery
+Event Hubs Namespace ❌ No 1-7 days N/A ❌ No ❌ No Capture to Storage Geo-Recovery Multiple Consumers ✅ Yes (Manual) ✅ Yes https://docs.microsoft.com/en-us/azure/event-hubs/event-hubs-geo-dr
+Log Analytics Workspace ❌ No 30-90 days N/A ❌ No ❌ No Data Export to Storage Archive Tier Linked Storage Accounts ❌ No ❌ No https://docs.microsoft.com/en-us/azure/azure-monitor/logs/logs-data-export
+Managed Applications ❌ No N/A N/A ❌ No ❌ No ARM Template Export Publisher Backup Tools Custom Scripts ❌ No ❌ No https://docs.microsoft.com/en-us/azure/azure-resource-manager/managed-applications/overview
+Synapse Workspace ⚠️ Partial 7 days (SQL only) Automatic (SQL) ✅ Yes (SQL only) ❌ No Git Integration SQL Pool Restore Points Storage Account Backup ❌ No ❌ No https://docs.microsoft.com/en-us/azure/synapse-analytics/backup-restore/backup-restore
+Storage Accounts ❌ No Configurable N/A ✅ Yes (with backup) ✅ Yes (Blobs) Soft Delete Versioning Immutable Blobs AzCopy ✅ Yes (Auto) ✅ Yes https://docs.microsoft.com/en-us/azure/storage/common/storage-disaster-recovery-guidance
+
+---
+
+Additional Direct Links for Specific Features:
+
+🛠️ Implementation Guides:
+
+· App Service Backup: https://docs.microsoft.com/en-us/azure/app-service/manage-backup
+· Event Hubs Capture: https://docs.microsoft.com/en-us/azure/event-hubs/event-hubs-capture-enable-through-portal
+· Storage Backup: https://docs.microsoft.com/en-us/azure/backup/blob-backup-configure-manage
+· Log Analytics Export: https://docs.microsoft.com/en-us/azure/azure-monitor/logs/logs-data-export?tabs=portal
+· Synapse Git Integration: https://docs.microsoft.com/en-us/azure/synapse-analytics/cicd/continuous-integration-deployment
+
+📚 General Azure Backup:
+
+· Azure Backup Overview: https://docs.microsoft.com/en-us/azure/backup/backup-overview
+· Disaster Recovery: https://docs.microsoft.com/en-us/azure/architecture/framework/resiliency/backup-and-recovery
+
+All links are direct Microsoft documentation starting with HTTPS for easy access and verification.
