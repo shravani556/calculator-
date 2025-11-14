@@ -29,3 +29,90 @@ Additional Direct Links for Specific Features:
 · Disaster Recovery: https://docs.microsoft.com/en-us/azure/architecture/framework/resiliency/backup-and-recovery
 
 All links are direct Microsoft documentation starting with HTTPS for easy access and verification.
+Azure SQL Database Snapshots - Official Microsoft Documentation
+
+📚 Official Microsoft Documentation Links:
+
+1. Database Snapshots (SQL Server Feature):
+
+https://docs.microsoft.com/en-us/sql/relational-databases/databases/database-snapshots-sql-server
+
+This covers traditional SQL Server database snapshots (on-premises & SQL Server on VMs)
+
+2. Azure SQL Database - Manual Backups (Equivalent to Snapshots):
+
+https://docs.microsoft.com/en-us/azure/azure-sql/database/automated-backups-overview#manual-backups
+
+3. Database Copy (Similar to Snapshot Functionality):
+
+https://docs.microsoft.com/en-us/azure/azure-sql/database/database-copy
+
+---
+
+🔍 Azure SQL Database "Snapshot" Reality:
+
+For Azure SQL Database:
+
+· ❌ No traditional "snapshot" feature like VM snapshots
+· ✅ Equivalent functionality through:
+  · Database Copy (point-in-time copy)
+  · Manual exports (bacpac files)
+  · Point-in-Time Restore (PITR)
+
+Available "Snapshot-like" Options:
+
+Method Similar to Snapshot Retention Cost
+Database Copy ✅ Yes Until deleted Additional database cost
+Export to bacpac ✅ Yes Storage cost only Storage cost
+PITR to new database ✅ Yes Until deleted Additional database cost
+
+---
+
+🔄 Snapshot vs Azure SQL Database Options:
+
+Feature Traditional Snapshot Azure SQL Database Equivalent
+Instant creation ✅ Yes ⚠️ Fast (seconds to minutes)
+Point-in-time ✅ Yes ✅ Yes (PITR)
+Zero storage overhead ✅ Yes (differential) ❌ No (full copy)
+Automated ✅ Yes ✅ Yes (PITR)
+Manual on-demand ✅ Yes ✅ Yes (Database Copy)
+
+---
+
+🎯 How to Create "Snapshots" in Azure SQL Database:
+
+Method 1: Database Copy (Recommended)
+
+```sql
+-- Creates an exact copy at current point in time
+CREATE DATABASE database_copy AS COPY OF original_database;
+```
+
+Method 2: Export to bacpac
+
+· Use Azure Portal → Export feature
+· Creates downloadable bacpac file
+· Stores in Azure Storage
+
+Method 3: Point-in-Time Restore
+
+· Restore to any point within retention period
+· Creates new database from backup
+
+---
+
+📊 Snapshot Capability Summary:
+
+Resource Type Snapshot Capable Snapshot Method Official Documentation
+Azure SQL Database ⚠️ Partial Database Copy, Export https://docs.microsoft.com/en-us/azure/azure-sql/database/database-copy
+Virtual Machines ✅ Yes VM Snapshots https://docs.microsoft.com/en-us/azure/virtual-machines/snapshots
+Storage Accounts ✅ Yes Blob Snapshots https://docs.microsoft.com/en-us/azure/storage/blobs/snapshots-overview
+App Services ❌ No Manual Backups https://docs.microsoft.com/en-us/azure/app-service/manage-backup
+
+---
+
+🚨 Important Note:
+
+"Azure SQL Database doesn't have traditional snapshots like VMs or storage. Instead, use Database Copy for immediate point-in-time copies or rely on the built-in PITR for recovery to any point within your retention period."
+
+Your database a00003-arstaging-prd can use Database Copy for snapshot-like functionality, but it will incur additional costs for the copied database.
