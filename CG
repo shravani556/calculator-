@@ -1,4 +1,53 @@
+vm2:
+    resource_group_key: "application"
+    os_type: windows
+    enabled: true
+    keyvault_key: "servicekv1"
+    create_sshkeys: false
+
+    network_interfaces:
+      nic1:
+        vm_setting_key: "windows"
+        vnet_key: "vnet_1_key"
+        subnet_key: "app_subnet"
+        primary: true
+        naming_convention:
+          name_mask: "a0001-vm-02-r-01-d-nic"
+        enable_ip_forwarding: false
+        accelerated_networking_enabled: false
+        private_ip_address_allocation: "Dynamic"
+
+    virtual_machine_settings:
+      windows:
+        naming_convention:
+          name_mask: "a0001vm02r01d"
+        size: "Standard_D8s_v3"
+        encryption_at_host_enabled: false
+        zone: "1"
+        network_interface_keys: ["nic1"]
+
+        os_disk:
+          naming_convention:
+            name_mask: "{name}"
+            name: "a0001-vm-02-r-01-d-osdisk"
+          caching: "ReadWrite"
+          storage_account_type: "StandardSSD_LRS"
+          disk_size_gb: 128
+          disk_encryption_set_key: "cmk_des"
+
+        identity:
+          type: "SystemAssigned, UserAssigned"
+          managed_identity_keys: ["uaimv"]
+
+        source_image_reference:
+          publisher: "MicrosoftWindowsServer"
+          offer: "WindowsServer"
+          sku: "2019-Datacenter-gensecond"
+          version: "latest"
+
 Resources
+
+
 | where type =~ "microsoft.compute/virtualmachines"
 | project name, location, resourceGroup, subscriptionId, properties.hardwareProfile.vmSize, properties.osProfile.computerName
 Azure Resources Backup & DR Analysis - Complete Details
