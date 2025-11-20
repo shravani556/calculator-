@@ -116,3 +116,58 @@ App Services ❌ No Manual Backups https://docs.microsoft.com/en-us/azure/app-se
 "Azure SQL Database doesn't have traditional snapshots like VMs or storage. Instead, use Database Copy for immediate point-in-time copies or rely on the built-in PITR for recovery to any point within your retention period."
 
 Your database a00003-arstaging-prd can use Database Copy for snapshot-like functionality, but it will incur additional costs for the copied database.
+
+
+Here is a clean, professional email draft you can send to Bryan Caddy, copying Kash, exactly as your leads instructed.
+
+
+---
+
+Subject: Request for Confirmation – Decommission or Region Migration for Sandbox Resources (West Central US)
+
+Hi Bryan,
+
+Hope you are doing well.
+
+As part of the Jira task MSAZ-11454, I have reviewed the resources currently present in the Sandbox subscription under the West Central US region.
+Below are the resources that are still active in this region:
+
+Default Log Analytics Workspace
+
+Network Watcher
+
+Security Center–related solutions
+
+SQL Advanced Threat Protection
+
+SQL Vulnerability Assessment
+
+Storage account (strguv01)
+
+Other default security/monitoring components
+
+
+All these resources are located in West Central US, and as per the analysis, there is no dependency to migrate them to another region, unless required by the subscription owner.
+
+Before proceeding further, I would like to request your confirmation on one of the following actions:
+
+1. Decommission these resources from the Sandbox environment
+OR
+
+
+2. Proceed with region migration to a standard region (if decommission is not approved)
+
+
+
+Kindly confirm your preferred approach so we can proceed accordingly.
+I have copied Kash for visibility.
+
+Please let me know if you need any more details.
+
+Thanks & Regards,
+Sravani B
+
+
+---
+
+If you want, I can create another version that is shorter/more formal — just tell me!
