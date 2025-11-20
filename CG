@@ -1,3 +1,6 @@
+Resources
+| where type =~ "microsoft.compute/virtualmachines"
+| project name, location, resourceGroup, subscriptionId, properties.hardwareProfile.vmSize, properties.osProfile.computerName
 Azure Resources Backup & DR Analysis - Complete Details
 
 Resource Type Default Backup Retention Period Backup Frequency PITR Capable Azure Backup Available Other Backup Methods Geo-Replication DR Capable MSFT Documentation
