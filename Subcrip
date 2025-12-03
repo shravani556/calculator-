@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# azure-retirements_rollup.sh
+# Tenant-wide Azure "Service Upgrade & Retirement" reports via Azure Resource Graph (ARG)
+# Produces: tenant rollup, per-subscription rollup, and optional detailed CSV
+# Works in Azure Cloud Shell (needs: az, jq, curl)
+
+set -euo pipefail
+
+# --- configuration via env or flags ---
+FORMAT="${FORMAT:-table}"         # table | json | csv
+DETAILS_OUT="${DETAILS_OUT:-}"    # e.g. DETAILS_OUT=retirements_detailed.csv
+SUMMARY_OUT="${SUMMARY_OUT:-}"    # e.g. SUMMARY_OUT=retirements_summary.csv
+SERVICE_FILTER="${SERVICE_FILTER:-}"  # regex (case-insensitive) to filter service names
+GLOBAL_JSON_URL="${GLOBAL_JSON_URL:-https://raw.githubusercontent.com/Azure/EOL/main/service_list.json}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
+need az; need jq; need curl
+az extension show -n resource-graph >/dev/null 2>&1 || az extension add -n resource-graph -y >/dev/null
+
+# All enabled subs in the current tenant
+SUBS=$(az account list --all --query "[?state=='Enabled'].id" -o tsv | tr '\n' ' ')
+[[ -z "$SUBS" ]] && { echo "No enabled subscriptions visible to this identity."; exit 0; }
+
+# Optional service filter clause (currently only used client-side)
+if [[ -n "$SERVICE_FILTER" ]]; then
+  SVC_KQL="| where serviceKey matches regex '(?i)${SERVICE_FILTER//\'/\'\'}'"
+  SVC_KQL2="| where serviceName matches regex '(?i)${SERVICE_FILTER//\'/\'\'}'"
+else
+  SVC_KQL=""
+  SVC_KQL2=""
+fi
+
+# ---------- KQL: Advisor rollups (no 'let' statements) ----------
+KQL_TENANT=$(
+  cat <<'KQL'
+advisorresources
+| where type =~ 'microsoft.advisor/recommendations'
+| extend category=tostring(properties.category), subCategory=tostring(properties.subCategory)
+| where category == 'HighAvailability' and subCategory == 'ServiceUpgradeAndRetirement'
+| extend retirementDate = coalesce(
+    todatetime(tostring(properties.extendedProperties.retirementDate)),
+    todatetime(tolong(properties.extendedProperties.retirementDate))
+  )
+| extend feature = tostring(properties.extendedProperties.retirementFeatureName)
+| extend service = coalesce(tostring(properties.extendedProperties.serviceName),
+                            tostring(properties.extendedProperties.retiringServiceName))
+| extend serviceKey = iff(isempty(service), feature, service)
+| extend bucket = case(
+    isnull(retirementDate), 'Unknown',
+    retirementDate < now(), 'Past',
+    retirementDate <= datetime_add('month', 6, now()),  '0-6 months',
+    retirementDate <= datetime_add('month',12, now()),  '6-12 months',
+    retirementDate <= datetime_add('month',24, now()),  '12-24 months',
+    '24+ months')
+| summarize
+    c_0_6     = countif(bucket == '0-6 months'),
+    c_6_12    = countif(bucket == '6-12 months'),
+    c_12_24   = countif(bucket == '12-24 months'),
+    c_24_plus = countif(bucket == '24+ months'),
+    c_past    = countif(bucket == 'Past'),
+    c_unknown = countif(bucket == 'Unknown'),
+    total     = count()
+  by serviceKey
+| order by total desc, serviceKey asc
+KQL
+)
+
+KQL_PER_SUB=$(
+  cat <<'KQL'
+advisorresources
+| where type =~ 'microsoft.advisor/recommendations'
+| extend category=tostring(properties.category), subCategory=tostring(properties.subCategory)
+| where category == 'HighAvailability' and subCategory == 'ServiceUpgradeAndRetirement'
+| extend retirementDate = coalesce(
+    todatetime(tostring(properties.extendedProperties.retirementDate)),
+    todatetime(tolong(properties.extendedProperties.retirementDate))
+  )
+| extend feature = tostring(properties.extendedProperties.retirementFeatureName)
+| extend service = coalesce(tostring(properties.extendedProperties.serviceName),
+                            tostring(properties.extendedProperties.retiringServiceName))
+| extend serviceKey = iff(isempty(service), feature, service)
+| extend bucket = case(
+    isnull(retirementDate), 'Unknown',
+    retirementDate < now(), 'Past',
+    retirementDate <= datetime_add('month', 6, now()),  '0-6 months',
+    retirementDate <= datetime_add('month',12, now()),  '6-12 months',
+    retirementDate <= datetime_add('month',24, now()),  '12-24 months',
+    '24+ months')
+| summarize
+    c_0_6     = countif(bucket == '0-6 months'),
+    c_6_12    = countif(bucket == '6-12 months'),
+    c_12_24   = countif(bucket == '12-24 months'),
+    c_24_plus = countif(bucket == '24+ months'),
+    c_past    = countif(bucket == 'Past'),
+    c_unknown = countif(bucket == 'Unknown'),
+    total     = count()
+  by subscriptionId, serviceKey
+| order by subscriptionId asc, total desc, serviceKey asc
+KQL
+)
+
+# ---------- KQL: Advisor detailed rows ----------
+KQL_DETAILS=$(
+  cat <<'KQL'
+advisorresources
+| where type =~ 'microsoft.advisor/recommendations'
+| extend category=tostring(properties.category), subCategory=tostring(properties.subCategory)
+| where category == 'HighAvailability' and subCategory == 'ServiceUpgradeAndRetirement'
+| extend retirementDate = coalesce(
+    todatetime(tostring(properties.extendedProperties.retirementDate)),
+    todatetime(tolong(properties.extendedProperties.retirementDate))
+  )
+| extend feature = tostring(properties.extendedProperties.retirementFeatureName)
+| extend service = coalesce(tostring(properties.extendedProperties.serviceName),
+                            tostring(properties.extendedProperties.retiringServiceName))
+| extend serviceKey = iff(isempty(service), feature, service)
+| extend learnMore = coalesce(tostring(properties.ibiza.learnMoreLink), tostring(properties.learnMoreLink))
+| extend description = tostring(properties.shortDescription.problem)
+| extend currentVersion = coalesce(
+    tostring(properties.extendedProperties.currentVersion),
+    tostring(properties.extendedProperties.currentApiVersion),
+    tostring(properties.extendedProperties.sourceVersion),
+    tostring(properties.extendedProperties.version))
+| extend nextVersion = coalesce(
+    tostring(properties.extendedProperties.targetVersion),
+    tostring(properties.extendedProperties.targetApiVersion),
+    tostring(properties.extendedProperties.recommendedVersion),
+    tostring(properties.extendedProperties.upgradeTo),
+    tostring(properties.extendedProperties.toVersion))
+| extend resourceIdGuess = tolower(substring(id, 0, indexof(id, "/providers/Microsoft.Advisor/recommendations/")))
+| extend resourceId = iff(isempty(tostring(properties.resourceMetadata.resourceId)), resourceIdGuess, tolower(tostring(properties.resourceMetadata.resourceId)))
+| project subscriptionId, serviceKey, feature, retirementDate, resourceId,
+          currentVersion, nextVersion, learnMore, description
+| join kind=leftouter (
+    ResourceContainers
+    | where type == 'microsoft.resources/subscriptions'
+    | project subscriptionId, subscriptionName=name, tenantId
+  ) on subscriptionId
+| project tenantId, subscriptionId, subscriptionName,
+          serviceKey, feature,
+          retirementDate=format_datetime(retirementDate,'yyyy-MM-dd'),
+          resourceId, currentVersion, nextVersion, learnMore, description
+| order by serviceKey asc, retirementDate asc, subscriptionName asc
+KQL
+)
+
+# ---------- run ARG queries (fixed --first) ----------
+run_q() {
+  local q="$1"
+  # --first must be between 1 and 1000 → use 1000
+  az graph query -q "$q" --subscriptions ${SUBS} --first 1000 -o json --query data
+}
+
+TENANT_JSON=$(run_q "$KQL_TENANT") || { echo "ARG query failed (tenant rollup)."; exit 1; }
+PER_SUB_JSON=$(run_q "$KQL_PER_SUB") || { echo "ARG query failed (per-sub rollup)."; exit 1; }
+
+# Optional filter on service (post-filter)
+if [[ -n "$SERVICE_FILTER" ]]; then
+  TENANT_JSON=$(echo "$TENANT_JSON"   | jq --arg re "$SERVICE_FILTER" 'map(select(.serviceKey|test($re; "i")))')
+  PER_SUB_JSON=$(echo "$PER_SUB_JSON" | jq --arg re "$SERVICE_FILTER" 'map(select(.serviceKey|test($re; "i")))')
+fi
+
+# ---------- print rollups ----------
+print_table() {
+  jq -r 'if length==0 then "No rows"
+         else (.[0] | keys_unsorted) as $h |
+              ($h | @tsv),
+              (.[] | [.[ $h[] ]] | @tsv)
+         end' | column -t -s $'\t'
+}
+
+to_csv() {
+  jq -r '
+    if length==0 then empty else
+      (.[0] | keys_unsorted) as $h |
+      ($h | @csv),
+      (.[] | [.[ $h[] ]] | @csv)
+    end'
+}
+
+echo "▶ Tenant total — Service/Feature vs retirement horizon"
+case "$FORMAT" in
+  json)  echo "$TENANT_JSON" ;;
+  csv)   echo "$TENANT_JSON" | to_csv ;;
+  table) echo "$TENANT_JSON" | print_table ;;
+  *)     echo "Unknown FORMAT=$FORMAT (use table|json|csv)"; exit 1;;
+esac
+echo
+
+echo "▶ Per-subscription breakdown — Service/Feature × SubscriptionId"
+case "$FORMAT" in
+  json)  echo "$PER_SUB_JSON" ;;
+  csv)   echo "$PER_SUB_JSON" | to_csv ;;
+  table) echo "$PER_SUB_JSON" | print_table ;;
+esac
+echo
+
+# ---------- detailed export (optional) ----------
+if [[ -n "$DETAILS_OUT" || -n "$SUMMARY_OUT" ]]; then
+  DETAILS_JSON=$(run_q "$KQL_DETAILS") || { echo "ARG query failed (details)."; exit 1; }
+  if [[ -n "$SERVICE_FILTER" ]]; then
+    DETAILS_JSON=$(echo "$DETAILS_JSON" | jq --arg re "$SERVICE_FILTER" 'map(select(.serviceKey|test($re; "i")))')
+  fi
+
+  # Enrich with Azure/EOL link as additional official reference
+  EOL_JSON=$(curl -fsSL "$GLOBAL_JSON_URL" 2>/dev/null || echo "[]")
+  ENRICHED=$(jq --argjson eol "$EOL_JSON" '
+     def lower: ascii_downcase;
+     def best_link($svc):
+       ($eol
+        | map(select( ((.ServiceName|lower) | contains($svc|lower)) or (($svc|lower) | contains((.ServiceName|lower))) ))
+        | if length>0 then .[0].Link else null end);
+     map(. + { referenceLink: best_link(.serviceKey) })
+  ' <<<"$DETAILS_JSON")
+
+  if [[ -n "$DETAILS_OUT" ]]; then
+    echo "$ENRICHED" \
+    | jq -r '(["tenantId","subscriptionId","subscriptionName","serviceKey","feature","retirementDate","resourceId","currentVersion","nextVersion","learnMore","referenceLink","description"] | @csv),
+             (.[] | [ .tenantId, .subscriptionId, .subscriptionName, .serviceKey, .feature, .retirementDate, .resourceId, .currentVersion, .nextVersion, .learnMore, .referenceLink, .description ] | @csv)' \
+    > "$DETAILS_OUT"
+    echo "✅ Wrote $DETAILS_OUT"
+  fi
+
+  if [[ -n "$SUMMARY_OUT" ]]; then
+    echo "$TENANT_JSON" \
+    | jq -r '(["serviceKey","c_0_6","c_6_12","c_12_24","c_24_plus","c_past","c_unknown","total"] | @csv),
+             (.[] | [ .serviceKey, .c_0_6, .c_6_12, .c_12_24, .c_24_plus, .c_past, .c_unknown, .total ] | @csv)' \
+    > "$SUMMARY_OUT"
+    echo "✅ Wrote $SUMMARY_OUT"
+  fi
+fi
