@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# azure-retirements.sh
+# List Azure service retirements: (1) global announcements, (2) subscription-specific impacts
+# Requires: az, jq, curl (present in Azure Cloud Shell)
+
+set -euo pipefail
+
+SCOPE="both"          # global | subscription | both
+FORMAT="table"        # table | json | csv
+SERVICE_FILTER=""     # e.g. "Azure Cache for Redis"
+DATE_FROM=""          # e.g. 2025-01-01
+DATE_TO=""            # e.g. 2028-12-31
+SUBSCRIPTIONS=""      # comma-separated subscription IDs/names; empty = all visible
+OUTFILE=""            # optional output file path
+
+GLOBAL_JSON_URL="${GLOBAL_JSON_URL:-https://raw.githubusercontent.com/Azure/EOL/main/service_list.json}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./azure-retirements.sh [--scope global|subscription|both]
+                              [--format table|json|csv]
+                              [--service "Name contains..."]
+                              [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+                              [--subscriptions "subId1,subId2,..."]
+                              [--out /path/to/file]
+
+Examples:
+  ./azure-retirements.sh --scope global --format table
+  ./azure-retirements.sh --scope subscription --service "Azure Kubernetes Service"
+  ./azure-retirements.sh --scope both --from 2025-01-01 --to 2028-12-31 --format csv --out retirements.csv
+EOF
+}
+
+# --- arg parsing ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scope) SCOPE="$2"; shift 2;;
+    --format) FORMAT="$2"; shift 2;;
+    --service) SERVICE_FILTER="$2"; shift 2;;
+    --from) DATE_FROM="$2"; shift 2;;
+    --to) DATE_TO="$2"; shift 2;;
+    --subscriptions|--subs) SUBSCRIPTIONS="$2"; shift 2;;
+    --out) OUTFILE="$2"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) echo "Unknown arg: $1"; usage; exit 1;;
+  esac
+done
+
+command -v jq >/dev/null || { echo "jq not found"; exit 1; }
+command -v curl >/dev/null || { echo "curl not found"; exit 1; }
+command -v az >/dev/null || { echo "az not found"; exit 1; }
+
+today_utc=$(date -u +%F)
+
+# --- helpers ---
+emit() {
+  # Collect output and also optionally tee to file
+  if [[ -n "${OUTFILE}" ]]; then tee -a "${OUTFILE}"; else cat; fi
+}
+
+jq_date_filter() {
+  # Builds a jq filter snippet for date range on .RetirementDate (global) or .retirementDate (subscription)
+  local field="$1"
+  local cond="true"
+  if [[ -n "${DATE_FROM}" ]]; then cond="${cond} and (.${field} >= \"${DATE_FROM}\")"; fi
+  if [[ -n "${DATE_TO}" ]]; then cond="${cond} and (.${field} <= \"${DATE_TO}\")"; fi
+  echo "${cond}"
+}
+
+print_as() {
+  local format="$1"
+  case "${format}" in
+    json) cat;;
+    csv)  jq -r '(
+             (.[0] | keys_unsorted) as $h |
+             $h, map([.[ $h[] ]])[] | @csv
+           )';;
+    table)
+      # pretty columns
+      jq -r '
+        if length==0 then "No rows" else
+          (.[0] | keys_unsorted) as $h |
+          ($h | @tsv),
+          (map([.[ $h[] ]])[] | @tsv)
+        end
+      ' | column -t -s $'\t'
+      ;;
+    *) echo "Unknown format ${format}" >&2; exit 1;;
+  esac
+}
+
+# --- GLOBAL LIST (public announcements) ---
+run_global() {
+  echo "🔎 Global Azure retirements (announced) — source: Azure/EOL JSON" | emit
+  local data
+  if ! data=$(curl -fsSL "${GLOBAL_JSON_URL}"); then
+    echo "WARNING: Could not fetch ${GLOBAL_JSON_URL}" | emit
+    return 0
+  fi
+
+  local jqFilter
+  jqFilter=$(jq_date_filter "RetirementDate")
+
+  echo "${data}" \
+  | jq --arg svc "${SERVICE_FILTER}" --arg today "${today_utc}" "
+      map(select(.RetirementDate >= \$today))             # upcoming from today
+      | ( if \$svc==\"\" then . else map(select(.ServiceName|test(\$svc; \"i\") or .RetiringFeature|test(\$svc; \"i\"))) end )
+      | map(select(${jqFilter}))
+      | sort_by(.RetirementDate, .ServiceName)
+      | map({
+          RetirementDate, ServiceName, RetiringFeature,
+          Link
+        })
+    " \
+  | print_as "${FORMAT}" | emit
+  echo "" | emit
+}
+
+# --- SUBSCRIPTION-SPECIFIC (Service Health via Azure Resource Graph) ---
+ensure_arg_extension() {
+  if ! az extension show -n resource-graph >/dev/null 2>&1; then
+    az extension add -n resource-graph -y >/dev/null
+  fi
+}
+
+run_subscription() {
+  echo "📣 Retirements impacting your subscriptions (Service Health)" | emit
+  ensure_arg_extension
+
+  # KQL from official docs: eventType=HealthAdvisory and eventSubType=Retirement
+  # https://learn.microsoft.com/azure/service-health/resource-graph-samples
+  read -r -d '' KQL <<'KQL'
+ServiceHealthResources
+| where type =~ 'Microsoft.ResourceHealth/events'
+| extend eventType = tostring(properties.EventType), eventSubType = tostring(properties.EventSubType)
+| where eventType == 'HealthAdvisory' and eventSubType == 'Retirement'
+| extend description = tostring(properties.Title),
+         summary = tostring(properties.Summary),
+         trackingId = tostring(properties.TrackingId),
+         impactStartTime = todatetime(tolong(properties.ImpactStartTime)),
+         retirementDate = todatetime(tolong(properties.ImpactMitigationTime)),
+         impactedServices = properties.ImpactedServices
+| where retirementDate > now()
+| mv-expand s = impactedServices
+| mv-expand r = s.ImpactedRegions
+| extend serviceName = tostring(s.ServiceName),
+         region = tostring(r.RegionName)
+| summarize regions = make_set(region),
+            description = any(description),
+            summary = any(summary),
+            retirementDate = any(retirementDate),
+            trackingId = any(trackingId)
+  by subscriptionId, serviceName
+| order by retirementDate asc, serviceName asc
+KQL
+
+  # Build az graph command
+  ARGS=(graph query -q "$KQL" -o json --first 1000)
+  if [[ -n "${SUBSCRIPTIONS}" ]]; then
+    ARGS+=(--subscriptions "${SUBSCRIPTIONS}")
+  fi
+
+  local res
+  if ! res=$(az "${ARGS[@]}"); then
+    echo "ERROR: az graph query failed" | emit
+    return 1
+  fi
+
+  # Optional service / date filtering in jq
+  local jqFilter
+  jqFilter=$(jq_date_filter "retirementDate")
+
+  echo "${res}" \
+  | jq --arg svc "${SERVICE_FILTER}" "
+      ( if \$svc==\"\" then . else map(select(.serviceName|test(\$svc; \"i\") or .summary|test(\$svc; \"i\") or .description|test(\$svc; \"i\"))) end )
+      | map(select(${jqFilter}))
+      | sort_by(.retirementDate, .serviceName)
+      | map({
+          subscriptionId,
+          retirementDate: (.retirementDate|tostring|sub(\"T.*$\";\"\")),
+          serviceName,
+          regions: ( .regions | sort | join(\"; \") ),
+          summary
+        })
+    " \
+  | print_as "${FORMAT}" | emit
+  echo "" | emit
+}
+
+case "${SCOPE}" in
+  global)        run_global ;;
+  subscription)  run_subscription ;;
+  both)          run_global; run_subscription ;;
+  *) echo "Invalid --scope ${SCOPE}"; usage; exit 1;;
+esac
+
+if [[ -n "${OUTFILE}" ]]; then
+  echo "✅ Wrote output to ${OUTFILE}"
+fi
