@@ -1,0 +1,9 @@
+TLS upgrade to TLS 1.2 for QA storage accounts to meet security and compliance requirements.
+
+Update TLS setting to 1.2 in Azure Portal for the three storage accounts and validate connectivity.
+
+No downtime expected. Minimal risk. Possible impact only if any legacy client still uses TLS 1.0/1.1.
+
+Revert TLS version to previous setting in Azure Portal if issues occur.
+
+Verify read/write access and confirm application connectivity after the change.
