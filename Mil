@@ -1,0 +1,18 @@
+Here is a short version:
+
+
+---
+
+Subject: TLS Upgrade – Confirmation Needed
+
+Hi Dustin,
+
+We received a request to upgrade TLS to 1.2 for: coreengst1qa, coresbsst1qa, and coremgmtst1qa.
+
+Could you please confirm if these resources have any code reference, or if they were created manually? If manual, are we good to proceed with raising the CMR for TLS upgrade?
+
+Thanks,
+Sravani
+
+
+---
