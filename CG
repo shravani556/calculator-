@@ -1,5 +1,5 @@
 git submodule deinit -f workload/modules/synapse && git rm -f workload/modules/synapse && rm -rf .git/modules/workload/modules/synapse
-
+git submodule deinit -f workload/modules/synapse; git rm -f workload/modules/synapse; Remove-Item -Recurse -Force .git/modules/workload/modules/synapse
 Here is a crisp and professional follow-up email you can send to Bryan:
 
 
