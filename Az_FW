@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   ./collect-azure-firewalls.sh
+#   ./collect-azure-firewalls.sh all_firewalls.tsv unused_firewalls.tsv
+#
+# File 1: full list of all firewalls
+# File 2: subset of "likely not active / not in use" VNet firewalls
+
+OUT_ALL="${1:-azure-firewalls-all.tsv}"
+OUT_UNUSED="${2:-azure-firewalls-unused.tsv}"
+
+# ---- Pre-flight checks ----
+if ! command -v az >/dev/null 2>&1; then
+  echo "ERROR: Azure CLI (az) not found. Install it first." >&2
+  exit 1
+fi
+
+# Will fail if you are not logged in
+if ! az account show >/dev/null 2>&1; then
+  echo "You are not logged into Azure CLI." >&2
+  echo "Run:  az login   (or az login --tenant <tenantId>)" >&2
+  exit 1
+fi
+
+# Make sure the azure-firewall extension is available
+# (az network firewall is provided by this extension) :contentReference[oaicite:1]{index=1}
+az extension add --name azure-firewall --upgrade >/dev/null
+
+# Get all enabled subscriptions for this account
+mapfile -t subs < <(az account list \
+  --only-show-errors \
+  --query "[?state=='Enabled'].id" \
+  -o tsv)
+
+if [ "${#subs[@]}" -eq 0 ]; then
+  echo "No enabled subscriptions found for the current account." >&2
+  exit 0
+fi
+
+echo "Found ${#subs[@]} enabled subscriptions." >&2
+
+# ---- Header for the 'all firewalls' file ----
+printf 'SubscriptionId\tResourceGroup\tName\tLocation\tSkuName\tSkuTier\tProvisioningState\tFirewallPolicyId\tThreatIntelMode\tIpConfigCount\tPublicIpCount\tAppRuleCollections\tNetRuleCollections\tNatRuleCollections\n' > "$OUT_ALL"
+
+# ---- Main loop over subscriptions ----
+for sub in "${subs[@]}"; do
+  echo "Collecting Azure Firewall data in subscription: $sub" >&2
+
+  # az network firewall list returns all firewalls in that subscription,
+  # across *all* regions. :contentReference[oaicite:2]{index=2}
+  az network firewall list \
+    --subscription "$sub" \
+    --only-show-errors \
+    --query "[].{
+        SubscriptionId: '$sub',
+        ResourceGroup:  resourceGroup,
+        Name:           name,
+        Location:       location,
+        SkuName:        sku.name,
+        SkuTier:        sku.tier,
+        ProvisioningState: provisioningState,
+        FirewallPolicyId: firewallPolicy.id,
+        ThreatIntelMode:  threatIntelMode,
+        IpConfigCount:     length(ipConfigurations),
+        PublicIpCount:     length(ipConfigurations[?publicIPAddress.id != null]),
+        AppRuleCollections: length(applicationRuleCollections),
+        NetRuleCollections: length(networkRuleCollections),
+        NatRuleCollections: length(natRuleCollections)
+      }" \
+    -o tsv >> "$OUT_ALL"
+done
+
+# ---- Derive "likely not active / not in use" set ----
+#
+# Heuristics (VNet firewalls only, sku == AZFW_VNet):
+# 1) IpConfigCount == 0
+#    - Typically means the firewall has been "deallocated" by removing IP
+#      configurations. :contentReference[oaicite:3]{index=3}
+# 2) IpConfigCount > 0 but:
+#      - PublicIpCount == 0
+#      - No application/network/NAT rule collections
+#      - No firewall policy attached
+#
+# For Virtual Hub firewalls (sku == AZFW_Hub), IPs are exposed via hubIpAddresses
+# instead of ipConfigurations, so we *do not* try to auto‑classify those here. :contentReference[oaicite:4]{index=4}
+
+awk -F'\t' -v out="$OUT_UNUSED" '
+  NR==1 {
+    # Copy header
+    print > out
+    next
+  }
+
+  # Field positions (tab-separated):
+  # 1 SubscriptionId
+  # 2 ResourceGroup
+  # 3 Name
+  # 4 Location
+  # 5 SkuName
+  # 6 SkuTier
+  # 7 ProvisioningState
+  # 8 FirewallPolicyId
+  # 9 ThreatIntelMode
+  # 10 IpConfigCount
+  # 11 PublicIpCount
+  # 12 AppRuleCollections
+  # 13 NetRuleCollections
+  # 14 NatRuleCollections
+
+  # Condition 1: VNet firewall with zero IP configs (deallocated / stopped)
+  ($5 == "AZFW_VNet" && $10 == "0") ||
+
+  # Condition 2: VNet firewall with IPs but no rules or policy, and no public IPs
+  ($5 == "AZFW_VNet" && $10 != "0" &&
+                       $11 == "0" &&
+                       $12 == "0" &&
+                       $13 == "0" &&
+                       $14 == "0" &&
+                       $8  == "") {
+    print >> out
+  }
+' "$OUT_ALL"
+
+echo
+echo "✅ Full list of Azure Firewalls written to:    $OUT_ALL"
+echo "✅ Likely NOT ACTIVE / NOT IN USE written to:  $OUT_UNUSED"
+echo
+echo "You can open these TSV files directly in Excel or Power BI (delimiter: TAB)."
