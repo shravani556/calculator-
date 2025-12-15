@@ -1,1 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
 
+OUT_FILE="${1:-azure-firewalls-with-status.tsv}"
+
+# ---- Pre-flight checks ----
+command -v az >/dev/null || { echo "Azure CLI not found"; exit 1; }
+az account show >/dev/null || { echo "Run az login first"; exit 1; }
+
+az extension add --name azure-firewall --upgrade >/dev/null
+
+# Get enabled subscriptions
+mapfile -t subs < <(az account list \
+  --query "[?state=='Enabled'].id" -o tsv)
+
+echo "Found ${#subs[@]} enabled subscriptions" >&2
+
+# ---- Header ----
+printf 'SubscriptionId\tResourceGroup\tName\tLocation\tSkuName\tSkuTier\tProvisioningState\tFirewallPolicyId\tThreatIntelMode\tIpConfigCount\tPublicIpCount\tAppRuleCollections\tNetRuleCollections\tNatRuleCollections\tActiveStatus\n' \
+> "$OUT_FILE"
+
+# ---- Collect firewalls ----
+for sub in "${subs[@]}"; do
+  echo "Processing subscription: $sub" >&2
+
+  az network firewall list \
+    --subscription "$sub" \
+    --query "[].{
+      SubscriptionId: '$sub',
+      ResourceGroup: resourceGroup,
+      Name: name,
+      Location: location,
+      SkuName: sku.name,
+      SkuTier: sku.tier,
+      ProvisioningState: provisioningState,
+      FirewallPolicyId: firewallPolicy.id,
+      ThreatIntelMode: threatIntelMode,
+      IpConfigCount: length(ipConfigurations),
+      PublicIpCount: length(ipConfigurations[?publicIPAddress.id != null]),
+      AppRuleCollections: length(applicationRuleCollections),
+      NetRuleCollections: length(networkRuleCollections),
+      NatRuleCollections: length(natRuleCollections)
+    }" -o tsv \
+  | awk -F'\t' '
+    BEGIN { OFS="\t" }
+    {
+      status="ACTIVE"
+
+      # NOT ACTIVE logic (VNet firewalls only)
+      if ($5=="AZFW_VNet" &&
+          $11=="0" &&
+          $12=="0" &&
+          $13=="0" &&
+          $14=="0" &&
+          $8=="") {
+        status="NOT_ACTIVE"
+      }
+
+      print $0, status
+    }
+  ' >> "$OUT_FILE"
+done
+
+echo
+echo "✅ Azure Firewall inventory written to: $OUT_FILE"
+echo "   Last column shows ACTIVE / NOT_ACTIVE"
