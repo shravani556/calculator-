@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Combined header
+echo -e "SubscriptionName\tSubscriptionId\tFirewallName\tResourceGroup\tLocation\tProvisioningState\tId"
+
+# Loop over all ENABLED subscriptions
+az account list --all \
+  --query "[?state=='Enabled'].{Name:name, Id:id}" \
+  -o tsv |
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  az account set --subscription "$SUB_ID"
+
+  # List firewalls in this subscription (if none, this prints nothing)
+  PYTHONWARNINGS=ignore az network firewall list \
+    --query "[].{Name:name, ResourceGroup:resourceGroup, Location:location, ProvisioningState:provisioningState, Id:id}" \
+    -o tsv 2>/dev/null | \
+  while IFS=$'\t' read -r FW_NAME RG LOC PROV FW_ID; do
+    # Skip empty lines (in case there are any)
+    [[ -z "$FW_NAME" ]] && continue
+    echo -e "${SUB_NAME}\t${SUB_ID}\t${FW_NAME}\t${RG}\t${LOC}\t${PROV}\t${FW_ID}"
+  done
+done
