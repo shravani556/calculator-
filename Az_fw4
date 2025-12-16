@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Collecting Azure Firewalls from all enabled subscriptions..."
+echo
+
+# Ensure azure-firewall extension is installed (quietly)
+if ! az extension show -n azure-firewall >/dev/null 2>&1; then
+  az extension add -n azure-firewall --only-show-errors >/dev/null 2>&1 || true
+fi
+
+# List only ENABLED subscriptions
+az account list --all \
+  --query "[?state=='Enabled'].{Name:name, Id:id}" \
+  -o tsv | \
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+
+  echo "================================================================="
+  echo "Subscription: $SUB_NAME ($SUB_ID)"
+  echo "================================================================="
+
+  az account set --subscription "$SUB_ID"
+
+  # Get count of firewalls (suppress extension warnings)
+  COUNT=$(PYTHONWARNINGS=ignore az network firewall list \
+    --query "length(@)" -o tsv 2>/dev/null || echo "")
+
+  if [[ -z "$COUNT" || "$COUNT" == "0" ]]; then
+    echo "No Azure Firewalls found in this subscription."
+    echo
+    continue
+  fi
+
+  # List firewall details (still suppress warnings)
+  PYTHONWARNINGS=ignore az network firewall list \
+    --query "[].{Name:name, ResourceGroup:resourceGroup, Location:location, ProvisioningState:provisioningState, Id:id}" \
+    --output table 2>/dev/null
+
+  echo
+done
