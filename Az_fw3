@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   ./list-azure-firewalls-status.sh
+#   ./list-azure-firewalls-status.sh output.tsv
+#
+# Default output file:
+OUT="${1:-azure-firewalls-status.tsv}"
+
+# ---- Pre-flight checks ----
+if ! command -v az >/dev/null 2>&1; then
+  echo "ERROR: Azure CLI (az) not found. Install it first." >&2
+  exit 1
+fi
+
+if ! az account show >/dev/null 2>&1; then
+  echo "You are not logged into Azure CLI." >&2
+  echo "Run:  az login   (or az login --tenant <tenantId>)" >&2
+  exit 1
+fi
+
+# Make sure the Azure Firewall extension is available
+az extension add --name azure-firewall --upgrade >/dev/null
+
+# Get all enabled subscriptions
+mapfile -t subs < <(az account list \
+  --query "[?state=='Enabled'].id" \
+  -o tsv)
+
+if [ "${#subs[@]}" -eq 0 ]; then
+  echo "No enabled subscriptions found for this account." >&2
+  exit 0
+fi
+
+echo "Found ${#subs[@]} enabled subscriptions." >&2
+
+# Temp file for raw data (without Status column yet)
+TMP_FILE="$(mktemp)"
+
+# Header
+printf 'SubscriptionId\tResourceGroup\tName\tLocation\tSkuName\tSkuTier\tProvisioningState\tFirewallPolicyId\tThreatIntelMode\tIpConfigCount\tPublicIpCount\tAppRuleCollections\tNetRuleCollections\tNatRuleCollections\n' > "$TMP_FILE"
+
+# ---- Collect all firewalls ----
+for sub in "${subs[@]}"; do
+  echo "Collecting firewalls in subscription: $sub" >&2
+
+  az network firewall list \
+    --subscription "$sub" \
+    --query "[].{
+        SubscriptionId: '$sub',
+        ResourceGroup:  resourceGroup,
+        Name:           name,
+        Location:       location,
+        SkuName:        sku.name,
+        SkuTier:        sku.tier,
+        ProvisioningState: provisioningState,
+        FirewallPolicyId: firewallPolicy.id,
+        ThreatIntelMode:  threatIntelMode,
+        IpConfigCount:     length(ipConfigurations),
+        PublicIpCount:     length(ipConfigurations[?publicIPAddress.id != null]),
+        AppRuleCollections: length(applicationRuleCollections),
+        NetRuleCollections: length(networkRuleCollections),
+        NatRuleCollections: length(natRuleCollections)
+      }" \
+    -o tsv >> "$TMP_FILE"
+done
+
+# ---- Add Active / NotActive flag ----
+#
+# Heuristics:
+# - For VNet firewalls (SkuName = AZFW_VNet):
+#     NotActive if:
+#       * IpConfigCount == 0
+#       OR
+#       * IpConfigCount > 0 but:
+#           PublicIpCount == 0
+#           AND no rule collections
+#           AND no firewall policy
+#
+# - For Hub firewalls (SkuName = AZFW_Hub):
+#     NotActive if:
+#       * no rule collections AND no policy
+#
+# Everything else is marked Active.
+
+awk -F'\t' '
+  NR==1 {
+    # Header
+    print $0 "\tStatus";
+    next
+  }
+
+  {
+    sku=$5;
+    ip=$10+0;
+    pip=$11+0;
+    app=$12+0;
+    net=$13+0;
+    nat=$14+0;
+    pol=$8;
+
+    status="Active";
+
+    if (sku=="AZFW_VNet") {
+      if (ip==0) {
+        status="NotActive";
+      } else if (pip==0 && app==0 && net==0 && nat==0 && pol=="") {
+        status="NotActive";
+      }
+    } else if (sku=="AZFW_Hub") {
+      if (app==0 && net==0 && nat==0 && pol=="") {
+        status="NotActive";
+      }
+    }
+
+    print $0 "\t" status;
+  }
+' "$TMP_FILE" > "$OUT"
+
+rm "$TMP_FILE"
+
+echo
+echo "✅ Azure Firewalls with status written to: $OUT"
+echo "   (Tab-delimited, can be opened directly in Excel / Power BI)"
+echo
