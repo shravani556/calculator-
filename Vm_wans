@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# List all Azure Virtual WANs across all subscriptions and regions
+# Output: a single JSON file with full vWAN objects + subscription metadata
+
+set -uo pipefail  # (no `-e` so we can skip over subs with errors)
+
+OUT_FILE="all_vwans_$(date +%Y%m%d_%H%M%S).json"
+TMP_FILE="$(mktemp)"
+
+echo "[]" > "$OUT_FILE"
+
+echo "Fetching subscriptions..." >&2
+# Get subscription ID and Name as tab-separated values
+az account list --query "[].{id:id,name:name}" -o tsv | while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+    echo "------------------------------------------------------------" >&2
+    echo "Processing subscription: $SUB_NAME ($SUB_ID)" >&2
+
+    # Switch to this subscription
+    if ! az account set --subscription "$SUB_ID" 2>/dev/null; then
+        echo "  [WARN] Cannot set subscription $SUB_ID – skipping." >&2
+        continue
+    fi
+
+    # Get all vWANs in this subscription (all regions)
+    if ! VWANS_JSON="$(az network vwan list -o json 2>/dev/null)"; then
+        echo "  [WARN] Failed to list vWANs in $SUB_ID – skipping." >&2
+        continue
+    fi
+
+    # If there are no vWANs, skip
+    if [[ "$(echo "$VWANS_JSON" | jq 'length')" -eq 0 ]]; then
+        echo "  No vWANs found in this subscription." >&2
+        continue
+    fi
+
+    # Attach subscription metadata to each vWAN object
+    echo "$VWANS_JSON" | jq --arg subId "$SUB_ID" --arg subName "$SUB_NAME" '
+        map(. + {
+            subscriptionId: $subId,
+            subscriptionName: $subName
+        })
+    ' > "$TMP_FILE"
+
+    # Merge into master file
+    jq -s '.[0] + .[1]' "$OUT_FILE" "$TMP_FILE" > "${OUT_FILE}.tmp"
+    mv "${OUT_FILE}.tmp" "$OUT_FILE"
+
+    echo "  Added $(jq 'length' "$TMP_FILE") vWAN(s) from $SUB_NAME." >&2
+done
+
+rm -f "$TMP_FILE"
+
+echo "============================================================" >&2
+echo "Done. Combined vWAN list saved to: $OUT_FILE" >&2
+echo "You can inspect it with, for example:" >&2
+echo "  cat $OUT_FILE | jq '.[] | {name, location, resourceGroup, subscriptionName}'" >&2
