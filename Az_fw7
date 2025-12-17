@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==============================
+# Config
+# ==============================
+
+# Metrics + namespace for Azure Firewall
+METRICS="ApplicationRuleHit,NetworkRuleHit,DataProcessed"
+NAMESPACE="Microsoft.Network/azureFirewalls"
+
+# Output CSV files
+SUMMARY_CSV="azure_firewall_90d_summary.csv"
+DETAILS_CSV="azure_firewall_90d_details.csv"
+
+echo "Checking Azure Firewall metrics for the last 90 days across all enabled subscriptions..."
+echo
+
+# Simple CSV escaping for double quotes
+esc() {
+  printf '%s' "$1" | sed 's/"/""/g'
+}
+
+# Initialize / overwrite CSV files with headers
+cat > "$SUMMARY_CSV" <<EOF
+subscriptionId,subscriptionName,firewallName,resourceGroup,location,applicationRuleHits,networkRuleHits,dataProcessed,totalHits,hadTraffic90d
+EOF
+
+cat > "$DETAILS_CSV" <<EOF
+subscriptionId,subscriptionName,firewallName,resourceGroup,location,metricName,timestamp,total,average,minimum,maximum,count
+EOF
+
+# Get all enabled subscriptions (name + id)
+SUBS=$(az account list --query "[?state=='Enabled'].{name:name,id:id}" -o tsv || true)
+
+if [[ -z "${SUBS:-}" ]]; then
+  echo "No enabled subscriptions found for this account."
+  exit 0
+fi
+
+FOUND_FW=0
+
+# ==============================
+# Loop over subscriptions
+# ==============================
+
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  # Skip empty lines (just in case)
+  [[ -z "${SUB_ID:-}" ]] && continue
+
+  echo "####################################################"
+  echo "Subscription : $SUB_NAME"
+  echo "ID           : $SUB_ID"
+  echo "####################################################"
+
+  # Try to switch; if it fails (MFA, permission, etc.), skip this subscription
+  if ! az account set --subscription "$SUB_ID" 2>/tmp/az_sub_error.log; then
+    echo "Failed to set subscription $SUB_ID. Reason:"
+    cat /tmp/az_sub_error.log
+    echo "Skipping this subscription and continuing..."
+    echo
+    continue
+  fi
+
+  # List all Azure Firewalls in this subscription
+  FWS=$(az resource list \
+    --resource-type Microsoft.Network/azureFirewalls \
+    --query '[].{name:name, rg:resourceGroup, id:id, location:location}' \
+    -o tsv || true)
+
+  if [[ -z "${FWS:-}" ]]; then
+    echo "No Azure Firewalls found in this subscription."
+    echo
+    continue
+  fi
+
+  FOUND_FW=1
+
+  # ==============================
+  # Loop over firewalls
+  # ==============================
+
+  while IFS=$'\t' read -r FW_NAME FW_RG FW_ID FW_LOCATION; do
+    # Skip empty lines (just in case)
+    [[ -z "${FW_ID:-}" ]] && continue
+
+    echo "===================================================="
+    echo "Firewall : $FW_NAME"
+    echo "RG       : $FW_RG"
+    echo "Location : $FW_LOCATION"
+    echo "Resource : $FW_ID"
+    echo "----------------------------------------------------"
+
+    # Fetch metrics for last 90 days, daily resolution
+    # Using --offset so we don't need local 'date' compatibility
+    METRIC_JSON=$(az monitor metrics list \
+      --resource "$FW_ID" \
+      --metrics "$METRICS" \
+      --namespace "$NAMESPACE" \
+      --offset 90d \
+      --interval P1D \
+      -o json || echo '{}')
+
+    # If no metrics are returned (e.g. metrics not enabled)
+    if [[ "$(echo "$METRIC_JSON" | jq '.value | length')" -eq 0 ]]; then
+      echo "No metrics returned for last 90 days (check diagnostics / metrics configuration)."
+      echo
+      continue
+    fi
+
+    # ------------------------------
+    # Per-metric totals (for summary)
+    # ------------------------------
+    read APP_HITS NET_HITS DATA_PROCESSED <<<"$(echo "$METRIC_JSON" | jq -r '
+      def sumMetric($metric):
+        [ .value[]?
+          | select(.name.value == $metric)
+          | .timeseries[]?.data[]?.total // 0
+        ] | add // 0;
+
+      [
+        sumMetric("ApplicationRuleHit"),
+        sumMetric("NetworkRuleHit"),
+        sumMetric("DataProcessed")
+      ] | @tsv
+    ')"
+
+    # Coerce empty to 0 just in case
+    APP_HITS=${APP_HITS:-0}
+    NET_HITS=${NET_HITS:-0}
+    DATA_PROCESSED=${DATA_PROCESSED:-0}
+
+    TOTAL_HITS=$(( APP_HITS + NET_HITS + DATA_PROCESSED ))
+
+    if [[ "$TOTAL_HITS" -gt 0 ]]; then
+      HAD_TRAFFIC="YES"
+      echo "Traffic in last 90 days: YES"
+    else
+      HAD_TRAFFIC="NO"
+      echo "Traffic in last 90 days: NO (all selected metrics are zero or missing)"
+    fi
+
+    echo "ApplicationRuleHit total : $APP_HITS"
+    echo "NetworkRuleHit total     : $NET_HITS"
+    echo "DataProcessed total      : $DATA_PROCESSED"
+    echo "Overall total            : $TOTAL_HITS"
+    echo
+
+    # ------------------------------
+    # Append summary row (one per FW)
+    # ------------------------------
+    echo "\"$(esc "$SUB_ID")\",\"$(esc "$SUB_NAME")\",\"$(esc "$FW_NAME")\",\"$(esc "$FW_RG")\",\"$(esc "$FW_LOCATION")\",$APP_HITS,$NET_HITS,$DATA_PROCESSED,$TOTAL_HITS,$HAD_TRAFFIC" \
+      >> "$SUMMARY_CSV"
+
+    # ------------------------------
+    # Append detailed rows (one per datapoint)
+    # ------------------------------
+    echo "$METRIC_JSON" | jq -r \
+      --arg subId "$SUB_ID" \
+      --arg subName "$SUB_NAME" \
+      --arg fwName "$FW_NAME" \
+      --arg fwRg "$FW_RG" \
+      --arg fwLocation "$FW_LOCATION" '
+      .value[]? as $m
+      | $m.name.value as $metric
+      | $m.timeseries[]?.data[]? as $d
+      | [
+          $subId,
+          $subName,
+          $fwName,
+          $fwRg,
+          $fwLocation,
+          $metric,
+          ($d.timeStamp // ""),
+          ($d.total // 0),
+          ($d.average // 0),
+          ($d.minimum // 0),
+          ($d.maximum // 0),
+          ($d.count // 0)
+        ]
+      | @csv
+    ' >> "$DETAILS_CSV"
+
+  done <<< "$FWS"
+
+  echo
+
+done <<< "$SUBS"
+
+if [[ "$FOUND_FW" -eq 0 ]]; then
+  echo "No Azure Firewalls found in any enabled subscription."
+else
+  echo "Done."
+  echo "Summary CSV : $SUMMARY_CSV"
+  echo "Details CSV : $DETAILS_CSV"
+fi
