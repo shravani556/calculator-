@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+
+# Exit if any command in a pipeline fails
+set -o pipefail
+
+########################################
+# Config
+########################################
+WINDOW_DAYS=90          # Look-back window in days
+CPU_THRESHOLD=5         # % CPU considered "active"
+
+########################################
+# Time window (Cloud Shell = GNU date)
+########################################
+END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+START_TIME=$(date -u -d "$WINDOW_DAYS days ago" +"%Y-%m-%dT%H:%M:%SZ")
+
+echo "=== Azure VM Idle/Zombie Report Across ALL Subscriptions ==="
+echo "Time window    : ${START_TIME} -> ${END_TIME}"
+echo "CPU threshold  : ${CPU_THRESHOLD}% (>= threshold = active)"
+echo
+
+# Table header
+printf "%-25s %-30s %-25s %-15s %-10s %-25s %-10s %-40s\n" \
+  "Subscription" "VM Name" "Resource Group" "Power State" "IdleDays" "Idle Since" "VMStatus" "Notes"
+printf -- '%.0s-' {1..180}; echo
+
+########################################
+# Helper: process all VMs in current subscription
+########################################
+process_subscription_vms() {
+  local SUB_NAME="$1"
+
+  az vm list -d -o tsv --query '[].{name:name, rg:resourceGroup, state:powerState, id:id}' | \
+  while IFS=$'\t' read -r VM_NAME RG STATE VM_ID; do
+    # Normalize power state (e.g. "VM running" -> "running")
+    POWER_STATE=$(echo "$STATE" | awk '{print $2}')
+
+    IDLE_DAYS="N/A"
+    IDLE_SINCE="N/A"
+    NOTES=""
+    VM_STATUS="NotRunning"
+
+    if [[ "$POWER_STATE" == "running" ]]; then
+      VM_STATUS="Unknown"
+
+      # Pull CPU metrics for this VM
+      METRICS_JSON=$(az monitor metrics list \
+        --resource "$VM_ID" \
+        --metrics "Percentage CPU" \
+        --aggregation Average \
+        --interval PT1H \
+        --start-time "$START_TIME" \
+        --end-time "$END_TIME" \
+        -o json 2>/dev/null)
+
+      # Check if we actually got a time series
+      HAS_DATA=$(echo "$METRICS_JSON" | jq -r '
+        if (.value|length == 0) or (.value[0].timeseries|length == 0) then
+          "no"
+        else
+          "yes"
+        end
+      ')
+
+      if [[ "$HAS_DATA" == "no" ]]; then
+        IDLE_DAYS="Unknown"
+        IDLE_SINCE="Unknown"
+        VM_STATUS="NoMetrics"
+        NOTES="No CPU metrics (check diagnostics/permissions)"
+      else
+        # Last non-null CPU sample (for "currently active/idle" note)
+        LAST_POINT=$(echo "$METRICS_JSON" | jq -r '
+          .value[0].timeseries[0].data
+          | map(select(.average != null))
+          | sort_by(.time)
+          | (last // empty)
+        ')
+
+        LAST_AVG=$(echo "$LAST_POINT" | jq -r '.average // "null"')
+        LAST_TIME=$(echo "$LAST_POINT" | jq -r '.time // "unknown"')
+
+        # Last time CPU was >= threshold (last "active" moment)
+        LAST_ACTIVE_TIME=$(echo "$METRICS_JSON" | jq --arg thr "$CPU_THRESHOLD" -r '
+          .value[0].timeseries[0].data
+          | map(select(.average != null and .average >= ($thr|tonumber)))
+          | sort_by(.time)
+          | (last // {time:"NONE_ACTIVE"})
+          | .time
+        ')
+
+        if [[ "$LAST_AVG" == "null" || "$LAST_TIME" == "unknown" ]]; then
+          IDLE_DAYS="Unknown"
+          IDLE_SINCE="Unknown"
+          VM_STATUS="NoMetrics"
+          NOTES="Only null CPU samples in last ${WINDOW_DAYS}d"
+        else
+          # Is it currently idle? (based on last CPU sample)
+          IS_CURRENTLY_IDLE="no"
+          if command -v bc >/dev/null 2>&1; then
+            cmp=$(echo "$LAST_AVG < $CPU_THRESHOLD" | bc -l 2>/dev/null)
+            [[ "$cmp" == "1" ]] && IS_CURRENTLY_IDLE="yes"
+          fi
+
+          NOW_EPOCH=$(date -u +%s)
+
+          if [[ "$LAST_ACTIVE_TIME" == "NONE_ACTIVE" ]]; then
+            # Never crossed threshold in the whole window → ZOMBIE
+            IDLE_DAYS=">=${WINDOW_DAYS}"
+            IDLE_SINCE="$START_TIME"
+            VM_STATUS="Zombie"
+            NOTES="No CPU >= ${CPU_THRESHOLD}% in last ${WINDOW_DAYS}d (fully idle)"
+          else
+            # Has been active at least once in the window
+            LAST_ACTIVE_EPOCH=$(date -d "$LAST_ACTIVE_TIME" +%s 2>/dev/null || echo "")
+            if [[ -n "$LAST_ACTIVE_EPOCH" ]]; then
+              IDLE_DAYS=$(( (NOW_EPOCH - LAST_ACTIVE_EPOCH) / 86400 ))
+            else
+              IDLE_DAYS="Unknown"
+            fi
+
+            IDLE_SINCE="$LAST_ACTIVE_TIME"
+
+            if [[ "$IS_CURRENTLY_IDLE" == "yes" ]]; then
+              VM_STATUS="Idle"
+              NOTES="Currently idle; last active >= ${CPU_THRESHOLD}% at ${LAST_ACTIVE_TIME}"
+            else
+              VM_STATUS="Active"
+              NOTES="Currently active; last sample ${LAST_AVG}% at ${LAST_TIME}"
+            fi
+          fi
+        fi
+      fi
+    else
+      # Not running → treat as NotRunning; we don't do CPU-based idle
+      IDLE_DAYS="N/A"
+      IDLE_SINCE="N/A"
+      VM_STATUS="NotRunning"
+      NOTES="VM not running (power state: ${POWER_STATE})"
+    fi
+
+    printf "%-25s %-30s %-25s %-15s %-10s %-25s %-10s %-40s\n" \
+      "$SUB_NAME" "$VM_NAME" "$RG" "$POWER_STATE" "$IDLE_DAYS" "$IDLE_SINCE" "$VM_STATUS" "$NOTES"
+  done
+}
+
+########################################
+# Loop over all enabled subscriptions
+########################################
+
+az account list -o tsv --query '[?state==`Enabled`].[id,name]' | \
+while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  echo
+  echo ">>> Processing subscription: ${SUB_NAME} (${SUB_ID})" >&2
+  az account set --subscription "$SUB_ID"
+  process_subscription_vms "$SUB_NAME"
+done
