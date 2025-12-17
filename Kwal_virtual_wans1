@@ -1,0 +1,4 @@
+Resources
+| where type =~ 'microsoft.network/virtualwans'
+| project name, location, resourceGroup, subscriptionId, properties
+| order by name asc
