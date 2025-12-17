@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================
+# Config
+# ============================================
+
+MAP_CSV="azure_firewall_loganalytics.csv"
+USAGE_CSV="azure_firewall_loganalytics_usage.csv"
+
+echo "Building Azure Firewall -> Log Analytics workspace mapping + usage across all enabled subscriptions..."
+echo
+
+# Simple CSV escaping for double quotes
+esc() {
+  printf '%s' "$1" | sed 's/\"/\"\"/g'
+}
+
+# Init CSVs with headers
+cat > "$MAP_CSV" <<EOF
+subscriptionId,subscriptionName,firewallName,resourceGroup,location,diagnosticSettingName,workspaceId,workspaceName,workspaceResourceGroup
+EOF
+
+cat > "$USAGE_CSV" <<EOF
+subscriptionId,subscriptionName,firewallName,resourceGroup,location,workspaceId,workspaceName,workspaceResourceGroup,usageName,usageLocalizedName,unit,currentValue,limit,quotaPeriod,currentValueGBIfBytes
+EOF
+
+# Get all enabled subscriptions (name + id)
+SUBS=$(az account list --query "[?state=='Enabled'].{name:name,id:id}" -o tsv || true)
+
+if [[ -z "${SUBS:-}" ]]; then
+  echo "No enabled subscriptions found for this account."
+  exit 0
+fi
+
+FOUND_FW=0
+
+# ============================================
+# Loop over subscriptions
+# ============================================
+
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  [[ -z "${SUB_ID:-}" ]] && continue
+
+  echo "####################################################"
+  echo "Subscription : $SUB_NAME"
+  echo "ID           : $SUB_ID"
+  echo "####################################################"
+
+  # Try to switch; if it fails (MFA, permission, etc.), skip this subscription
+  if ! az account set --subscription "$SUB_ID" 2>/tmp/az_sub_error.log; then
+    echo "Failed to set subscription $SUB_ID. Reason:"
+    cat /tmp/az_sub_error.log
+    echo "Skipping this subscription and continuing..."
+    echo
+    continue
+  fi
+
+  # List all Azure Firewalls in this subscription
+  FWS=$(az resource list \
+    --resource-type Microsoft.Network/azureFirewalls \
+    --query '[].{name:name, rg:resourceGroup, id:id, location:location}' \
+    -o tsv || true)
+
+  if [[ -z "${FWS:-}" ]]; then
+    echo "No Azure Firewalls found in this subscription."
+    echo
+    continue
+  fi
+
+  FOUND_FW=1
+
+  # ==========================================
+  # Loop over firewalls
+  # ==========================================
+
+  while IFS=$'\t' read -r FW_NAME FW_RG FW_ID FW_LOCATION; do
+    [[ -z "${FW_ID:-}" ]] && continue
+
+    echo "===================================================="
+    echo "Firewall : $FW_NAME"
+    echo "RG       : $FW_RG"
+    echo "Location : $FW_LOCATION"
+    echo "Resource : $FW_ID"
+    echo "----------------------------------------------------"
+
+    # Get diagnostic settings for this firewall
+    DIAG_JSON=$(az monitor diagnostic-settings list \
+      --resource "$FW_ID" \
+      -o json 2>/dev/null || echo '{}')
+
+    # Handle both shapes: { "value": [ ... ] } and [ ... ]
+    ROWS=$(
+      echo "$DIAG_JSON" | jq -r '
+        if type == "object" and has("value") then
+          .value[]
+        elif type == "array" then
+          .[]
+        else
+          empty
+        end
+        | select(.workspaceId != null and .workspaceId != "")
+        | [
+            .name // "",
+            .workspaceId // ""
+          ]
+        | @tsv
+      ' || true
+    )
+
+    if [[ -z "${ROWS:-}" ]]; then
+      echo "No diagnostic settings with workspaceId for this firewall (no Log Analytics configured, or only Storage/Event Hub)."
+      echo
+      continue
+    fi
+
+    echo "Diagnostic settings with Log Analytics workspace found:"
+    while IFS=$'\t' read -r DS_NAME WS_ID; do
+      [[ -z "${WS_ID:-}" ]] && continue
+
+      # Look up workspace details (may fail if you lack rights)
+      WS_JSON=$(az monitor log-analytics workspace show --ids "$WS_ID" -o json 2>/dev/null || echo '{}')
+
+      WS_NAME=$(echo "$WS_JSON" | jq -r '.name // ""')
+      WS_RG=$(echo "$WS_JSON" | jq -r '.resourceGroup // ""')
+
+      echo "  - $DS_NAME -> $WS_NAME ($WS_ID)"
+
+      # Mapping row (firewall -> workspace)
+      echo "\"$(esc "$SUB_ID")\",\"$(esc "$SUB_NAME")\",\"$(esc "$FW_NAME")\",\"$(esc "$FW_RG")\",\"$(esc "$FW_LOCATION")\",\"$(esc "$DS_NAME")\",\"$(esc "$WS_ID")\",\"$(esc "$WS_NAME")\",\"$(esc "$WS_RG")\"" \
+        >> "$MAP_CSV"
+
+      # ==========================
+      # Usage metrics (size etc.)
+      # ==========================
+
+      if [[ -n "$WS_NAME" && -n "$WS_RG" ]]; then
+        USAGE_JSON=$(az monitor log-analytics workspace list-usages \
+          --resource-group "$WS_RG" \
+          --workspace-name "$WS_NAME" \
+          -o json 2>/dev/null || echo '{}')
+
+        # Emit one row per usage metric
+        echo "$USAGE_JSON" | jq -r '
+          (.value // .)[]? as $u
+          | (
+              $u.name.value // $u.name // ""
+            ) as $name
+          | (
+              $u.name.localizedValue // ""
+            ) as $loc
+          | ($u.unit // "") as $unit
+          | ($u.currentValue // 0) as $cur
+          | ($u.limit // 0) as $lim
+          | ($u.quotaPeriod // "") as $qp
+          | (if ($unit | ascii_downcase) == "bytes"
+             then ($cur / (1024*1024*1024))
+             else null
+             end) as $curGB
+          | [
+              $name,
+              $loc,
+              $unit,
+              $cur,
+              $lim,
+              $qp,
+              ($curGB // "")
+            ]
+          | @tsv
+        ' 2>/dev/null | while IFS=$'\t' read -r U_NAME U_LOC U_UNIT U_CUR U_LIM U_QP U_CUR_GB; do
+          echo "\"$(esc "$SUB_ID")\",\"$(esc "$SUB_NAME")\",\"$(esc "$FW_NAME")\",\"$(esc "$FW_RG")\",\"$(esc "$FW_LOCATION")\",\"$(esc "$WS_ID")\",\"$(esc "$WS_NAME")\",\"$(esc "$WS_RG")\",\"$(esc "$U_NAME")\",\"$(esc "$U_LOC")\",\"$(esc "$U_UNIT")\",\"$(esc "$U_CUR")\",\"$(esc "$U_LIM")\",\"$(esc "$U_QP")\",\"$(esc "$U_CUR_GB")\"" \
+            >> "$USAGE_CSV"
+        done
+      fi
+
+    done <<< "$ROWS"
+
+    echo
+
+  done <<< "$FWS"
+
+  echo
+
+done <<< "$SUBS"
+
+if [[ "$FOUND_FW" -eq 0 ]]; then
+  echo "No Azure Firewalls found in any enabled subscription."
+else
+  echo "Done."
+  echo "Mapping CSV : $MAP_CSV"
+  echo "Usage   CSV : $USAGE_CSV"
+fi
