@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Azure Firewall metrics that indicate traffic
+METRICS="ApplicationRuleHit,NetworkRuleHit,DataProcessed"
+NAMESPACE="Microsoft.Network/azureFirewalls"
+
+echo "Checking Azure Firewall metrics for the last 24 hours across all enabled subscriptions..."
+echo
+
+SUBS=$(az account list --query "[?state=='Enabled'].{name:name,id:id}" -o tsv)
+
+if [[ -z "$SUBS" ]]; then
+  echo "No enabled subscriptions found for this account."
+  exit 0
+fi
+
+FOUND_FW=0
+
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  echo "####################################################"
+  echo "Subscription : $SUB_NAME"
+  echo "ID           : $SUB_ID"
+  echo "####################################################"
+
+  az account set --subscription "$SUB_ID"
+
+  FWS=$(az resource list \
+    --resource-type Microsoft.Network/azureFirewalls \
+    --query '[].{name:name, rg:resourceGroup, id:id, location:location}' \
+    -o tsv)
+
+  if [[ -z "$FWS" ]]; then
+    echo "No Azure Firewalls found in this subscription."
+    echo
+    continue
+  fi
+
+  FOUND_FW=1
+
+  while IFS=$'\t' read -r FW_NAME FW_RG FW_ID FW_LOCATION; do
+    echo "===================================================="
+    echo "Firewall : $FW_NAME"
+    echo "RG       : $FW_RG"
+    echo "Location : $FW_LOCATION"
+    echo "Resource : $FW_ID"
+    echo "----------------------------------------------------"
+
+    METRIC_JSON=$(az monitor metrics list \
+      --resource "$FW_ID" \
+      --metrics "$METRICS" \
+      --namespace "$NAMESPACE" \
+      --offset 24h \
+      --interval PT1H \
+      -o json)
+
+    if [[ "$(echo "$METRIC_JSON" | jq '.value | length')" -eq 0 ]]; then
+      echo "No metrics returned (check diagnostics / metrics configuration)."
+      echo
+      continue
+    fi
+
+    TOTAL_HITS=$(echo "$METRIC_JSON" | jq '
+      [ .value[]?        
+        | .timeseries[]?
+        | .data[]?
+        | (.total // 0)
+      ] | add // 0
+    ')
+
+    if [[ "$TOTAL_HITS" -gt 0 ]]; then
+      echo "Traffic in last 24h: YES"
+    else
+      echo "Traffic in last 24h: NO (all selected metrics are zero or missing)"
+    fi
+
+    echo
+    echo "Per-metric totals for last 24h:"
+    echo "$METRIC_JSON" | jq -r '
+      .value[]? as $m
+      | $m.name.value as $name
+      | ([ $m.timeseries[]?.data[]?.total // 0 ] | add // 0) as $sum
+      | "  \($name): \($sum)"
+    '
+    echo
+
+  done <<< "$FWS"
+
+  echo
+
+done <<< "$SUBS"
+
+if [[ "$FOUND_FW" -eq 0 ]]; then
+  echo "No Azure Firewalls found in any enabled subscription."
+fi
