@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="${1:-cosmos_backups.csv}"
+
+err() { printf 'ERROR: %s\n' "$*" >&2; }
+
+# --- checks ---
+command -v az >/dev/null || { err "Azure CLI not found"; exit 1; }
+command -v jq >/dev/null || { err "jq not found"; exit 1; }
+
+az account show >/dev/null 2>&1 || { err "Run az login"; exit 1; }
+
+SUBS="$(az account list --all --query "[?state=='Enabled'].id" -o tsv)"
+
+printf '%s\n' \
+'subscriptionId,subscriptionName,resourceGroup,cosmosName,backupType,retentionHours,intervalMinutes,allocatedSizeGB,utilizedSizeGB' \
+> "$OUTFILE"
+
+printf '%s\n' "$SUBS" | while read -r SUB_ID; do
+  az account set --subscription "$SUB_ID"
+
+  SUB_NAME="$(az account show --query name -o tsv)"
+
+  COSMOS_LIST="$(az cosmosdb list --query "[].{rg:resourceGroup,name:name,id:id}" -o tsv)"
+
+  [ -n "$COSMOS_LIST" ] || continue
+
+  printf '%s\n' "$COSMOS_LIST" | while IFS=$'\t' read -r RG NAME ID; do
+
+    POLICY="$(az cosmosdb show -g "$RG" -n "$NAME" --query backupPolicy -o json)"
+
+    TYPE="$(jq -r '.type // "Unknown"' <<< "$POLICY")"
+    RETENTION="$(jq -r '.continuousModeProperties.continuousBackupRetentionIntervalInHours // empty' <<< "$POLICY")"
+    INTERVAL="$(jq -r '.periodicModeProperties.backupIntervalInMinutes // empty' <<< "$POLICY")"
+
+    # ---- STORAGE METRIC (Bytes → GB) ----
+    USED_BYTES="$(az monitor metrics list \
+      --resource "$ID" \
+      --metric "TotalDataUsage" \
+      --interval PT1H \
+      --aggregation Maximum \
+      --query "value[0].timeseries[0].data[-1].maximum" \
+      -o tsv 2>/dev/null || echo 0)"
+
+    USED_GB="$(awk "BEGIN {printf \"%.2f\", ${USED_BYTES:-0}/1024/1024/1024}")"
+
+    # Cosmos DB is elastic → allocated ~= utilized
+    ALLOCATED_GB="$USED_GB"
+
+    printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
+      "$SUB_ID" "$SUB_NAME" "$RG" "$NAME" "$TYPE" \
+      "${RETENTION:-}" "${INTERVAL:-}" \
+      "$ALLOCATED_GB" "$USED_GB" >> "$OUTFILE"
+
+  done
+done
+
+printf 'Done. Output file: %s\n' "$OUTFILE"
