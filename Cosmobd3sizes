@@ -1,1 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
 
+# Optional: pass output filename as first arg. Defaults to cosmos-usage-<timestamp>.tsv
+OUTFILE="${1:-cosmos-usage-$(date +%Y%m%d%H%M%S).tsv}"
+
+echo "Writing results to: $OUTFILE" >&2
+
+# Header row (tab-separated)
+printf 'subscriptionId\tsubscriptionName\tresourceGroup\taccountName\tlocation\tkind\tconsistency\tofferType\tdataUsageBytes\tdataUsageGB\n' > "$OUTFILE"
+
+# Make sure you are logged in: az login (or managed identity / Cloud Shell)
+az account list --query '[].{id:id,name:name}' -o tsv |
+while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  echo "== Subscription: $SUB_NAME ($SUB_ID) ==" >&2
+  az account set --subscription "$SUB_ID"
+
+  # List Cosmos DB accounts in this subscription with key properties
+  COSMOS_LIST=$(
+    az cosmosdb list \
+      --query "[].{name:name,rg:resourceGroup,location:location,kind:kind,id:id,consistency:consistencyPolicy.defaultConsistencyLevel,offerType:databaseAccountOfferType}" \
+      -o tsv
+  )
+
+  if [[ -z "${COSMOS_LIST}" ]]; then
+    echo "   No Cosmos DB accounts in this subscription." >&2
+    continue
+  fi
+
+  # Loop through each Cosmos DB account in this subscription
+  while IFS=$'\t' read -r ACC_NAME RG LOCATION KIND ID CONSISTENCY OFFER_TYPE; do
+    echo "   Cosmos account: $ACC_NAME (RG: $RG, Location: $LOCATION)" >&2
+
+    # Query Azure Monitor metrics for DataUsage on this Cosmos DB account
+    # DataUsage metric is in namespace Microsoft.DocumentDB/databaseAccounts.
+    BYTES=$(
+      az monitor metrics list \
+        --resource "$ID" \
+        --namespace "Microsoft.DocumentDB/databaseAccounts" \
+        --metric "DataUsage" \
+        --interval PT1H \
+        --aggregation Total \
+        --query "value[0].timeseries[0].data[-1].total" \
+        -o tsv 2>/dev/null || echo ""
+    )
+
+    # Handle cases where no metric data is returned yet
+    if [[ -z "$BYTES" || "$BYTES" == "null" ]]; then
+      BYTES=0
+      GB=0
+    else
+      # Convert bytes to GiB
+      GB=$(awk -v b="$BYTES" 'BEGIN { printf "%.2f", b/1024/1024/1024 }')
+    fi
+
+    # Append row to TSV file
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$SUB_ID" "$SUB_NAME" "$RG" "$ACC_NAME" "$LOCATION" "$KIND" "$CONSISTENCY" "$OFFER_TYPE" "$BYTES" "$GB" \
+      >> "$OUTFILE"
+
+  done <<< "$COSMOS_LIST"
+done
+
+echo "Done. Results written to $OUTFILE" >&2
+\
