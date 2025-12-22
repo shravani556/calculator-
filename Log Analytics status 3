@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="log_analytics_usage_report.csv"
+
+echo "SubscriptionName,SubscriptionId,ResourceGroup,WorkspaceName,WorkspaceId,LastLogTime,DaysInactive,Status" > "$OUTFILE"
+
+# Loop through all enabled subscriptions
+az account list --query "[?state=='Enabled'].id" -o tsv | while read -r SUB_ID; do
+  az account set --subscription "$SUB_ID"
+  SUB_NAME=$(az account show --query name -o tsv)
+
+  # List all Log Analytics Workspaces
+  az monitor log-analytics workspace list \
+    --query "[].{name:name, rg:resourceGroup, id:customerId}" \
+    -o tsv | while read -r WS_NAME RG WS_ID; do
+
+      # Safer query: works even if tables differ or are empty
+      LAST_LOG_TIME=$(az monitor log-analytics query \
+        --workspace "$WS_ID" \
+        --analytics-query "search * | summarize LastLog=max(TimeGenerated)" \
+        --query "tables[0].rows[0][0]" \
+        -o tsv 2>/dev/null || echo "")
+
+      if [[ -z "$LAST_LOG_TIME" || "$LAST_LOG_TIME" == "null" ]]; then
+        STATUS="NEVER USED"
+        DAYS_INACTIVE="N/A"
+      else
+        LAST_EPOCH=$(date -d "$LAST_LOG_TIME" +%s)
+        NOW_EPOCH=$(date +%s)
+        DAYS_INACTIVE=$(( (NOW_EPOCH - LAST_EPOCH) / 86400 ))
+
+        if [[ $DAYS_INACTIVE -ge 90 ]]; then
+          STATUS="NOT IN USE (>90 days)"
+        else
+          STATUS="IN USE"
+        fi
+      fi
+
+      echo "$SUB_NAME,$SUB_ID,$RG,$WS_NAME,$WS_ID,$LAST_LOG_TIME,$DAYS_INACTIVE,$STATUS" >> "$OUTFILE"
+
+  done
+done
+
+echo "✅ Report generated: $OUTFILE"
