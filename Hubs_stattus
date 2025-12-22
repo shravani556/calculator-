@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WINDOW_DAYS=90
+OUTFILE="inactive_eventhubs_with_size.csv"
+METRIC_IN="IncomingMessages"
+METRIC_OUT="OutgoingMessages"
+
+END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+START_TIME=$(date -u -d "${WINDOW_DAYS} days ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+             date -u -v-"${WINDOW_DAYS}"d +"%Y-%m-%dT%H:%M:%SZ")
+
+csv() { printf '"%s"' "${1//\"/\"\"}"; }
+
+echo '"Subscription","ResourceGroup","Namespace","EventHub","Sku","CapacityUnits","AutoInflate","MaxCapacity","Partitions","RetentionDays","IdleDays","IdleBucket","Status","Notes"' > "$OUTFILE"
+
+az account list --query "[?state=='Enabled'].[id,name]" -o tsv |
+while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  az account set --subscription "$SUB_ID" || continue
+
+  az eventhubs namespace list \
+    --query "[].{rg:resourceGroup,name:name,sku:sku.name,cap:sku.capacity,ai:isAutoInflateEnabled,max:maxThroughputUnits}" -o tsv |
+  while IFS=$'\t' read -r RG NS SKU CAP AI MAXCAP; do
+
+    az eventhubs eventhub list -g "$RG" --namespace-name "$NS" \
+      --query "[].{name:name,part:partitionCount,ret:messageRetentionInDays,id:id}" -o tsv |
+    while IFS=$'\t' read -r EH PART RET ID; do
+
+      IDLE_DAYS="$WINDOW_DAYS"
+      BUCKET="90+ Days"
+      STATUS="Inactive"
+      NOTES="No traffic detected"
+
+      if ! METRICS=$(az monitor metrics list \
+          --resource "$ID" \
+          --metrics "$METRIC_IN,$METRIC_OUT" \
+          --aggregation Total \
+          --start-time "$START_TIME" \
+          --end-time "$END_TIME" -o json 2>/dev/null); then
+        NOTES="Permission denied to read metrics (195)"
+      else
+        TOTAL=$(echo "$METRICS" | jq -r '
+          .value[].timeseries[].data[].total // 0' | awk '{s+=$1} END{print s+0}')
+
+        if (( TOTAL > 0 )); then
+          STATUS="Active"
+          BUCKET="Active"
+          IDLE_DAYS="0"
+          NOTES="Traffic detected"
+        fi
+      fi
+
+      if [[ "$STATUS" == "Inactive" ]]; then
+        {
+        csv "$SUB_NAME"; printf ','
+        csv "$RG"; printf ','
+        csv "$NS"; printf ','
+        csv "$EH"; printf ','
+        csv "$SKU"; printf ','
+        csv "$CAP"; printf ','
+        csv "$AI"; printf ','
+        csv "$MAXCAP"; printf ','
+        csv "$PART"; printf ','
+        csv "$RET"; printf ','
+        csv "$IDLE_DAYS"; printf ','
+        csv "$BUCKET"; printf ','
+        csv "$STATUS"; printf ','
+        csv "$NOTES"
+        printf '\n'
+        } >> "$OUTFILE"
+      fi
+
+    done
+  done
+done
+
+echo "✅ Report generated: $OUTFILE"
