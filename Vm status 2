@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+########################################
+# CONFIG
+########################################
+CPU_THRESHOLD=5
+WINDOW_DAYS=90
+METRIC_NAME="Percentage CPU"
+OUTFILE="inactive_vms_with_size.csv"
+
+########################################
+# Time window
+########################################
+END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+START_TIME=$(date -u -d "${WINDOW_DAYS} days ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+             date -u -v-"${WINDOW_DAYS}"d +"%Y-%m-%dT%H:%M:%SZ")
+
+########################################
+# CSV helper
+########################################
+csv() { printf '"%s"' "${1//\"/\"\"}"; }
+
+########################################
+# Header
+########################################
+{
+csv "Subscription"; printf ','
+csv "VMName"; printf ','
+csv "ResourceGroup"; printf ','
+csv "PowerState"; printf ','
+csv "VMSize"; printf ','
+csv "vCPU"; printf ','
+csv "MemoryGB"; printf ','
+csv "IdleDays"; printf ','
+csv "IdleBucket"; printf ','
+csv "Status"; printf '\n'
+} > "$OUTFILE"
+
+########################################
+# Loop subscriptions
+########################################
+az account list --query "[?state=='Enabled'].[id,name]" -o tsv |
+while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  az account set --subscription "$SUB_ID"
+
+  az vm list -d --query "[].{
+      name:name,
+      rg:resourceGroup,
+      state:powerState,
+      size:hardwareProfile.vmSize,
+      id:id
+    }" -o tsv |
+
+  while IFS=$'\t' read -r VM RG STATE SIZE VMID; do
+    POWER=$(echo "$STATE" | awk '{print $2}')
+
+    ########################################
+    # VM Size info
+    ########################################
+    SIZE_INFO=$(az vm list-sizes --location eastus \
+      --query "[?name=='$SIZE'].[numberOfCores,memoryInMb]" -o tsv 2>/dev/null | head -n1)
+
+    VCPU=$(echo "$SIZE_INFO" | awk '{print $1}')
+    MEMGB=$(echo "$SIZE_INFO" | awk '{printf "%.1f", $2/1024}')
+
+    IDLE_DAYS="N/A"
+    BUCKET="N/A"
+    STATUS="Inactive"
+
+    ########################################
+    # If running → check CPU
+    ########################################
+    if [[ "$POWER" == "running" ]]; then
+      METRICS=$(az monitor metrics list \
+        --resource "$VMID" \
+        --metrics "$METRIC_NAME" \
+        --aggregation Average \
+        --interval PT1H \
+        --start-time "$START_TIME" \
+        --end-time "$END_TIME" -o json 2>/dev/null)
+
+      LAST_ACTIVE=$(echo "$METRICS" | jq -r --arg t "$CPU_THRESHOLD" '
+        .value[0].timeseries[0].data
+        | map(select(.average!=null and .average>=($t|tonumber)))
+        | sort_by(.timeStamp)
+        | last.timeStamp // empty
+      ')
+
+      if [[ -n "$LAST_ACTIVE" ]]; then
+        LAST_EPOCH=$(date -d "$LAST_ACTIVE" +%s 2>/dev/null || echo "")
+        NOW=$(date +%s)
+        IDLE_DAYS=$(( (NOW - LAST_EPOCH) / 86400 ))
+      else
+        IDLE_DAYS=$WINDOW_DAYS
+      fi
+    fi
+
+    ########################################
+    # Bucket
+    ########################################
+    if [[ "$IDLE_DAYS" =~ ^[0-9]+$ ]]; then
+      if (( IDLE_DAYS >= 90 )); then BUCKET="90+ Days"
+      elif (( IDLE_DAYS >= 60 )); then BUCKET="60+ Days"
+      elif (( IDLE_DAYS >= 30 )); then BUCKET="30+ Days"
+      else STATUS="Active"
+      fi
+    fi
+
+    ########################################
+    # Write CSV (only inactive)
+    ########################################
+    if [[ "$STATUS" == "Inactive" ]]; then
+      {
+      csv "$SUB_NAME"; printf ','
+      csv "$VM"; printf ','
+      csv "$RG"; printf ','
+      csv "$POWER"; printf ','
+      csv "$SIZE"; printf ','
+      csv "$VCPU"; printf ','
+      csv "$MEMGB"; printf ','
+      csv "$IDLE_DAYS"; printf ','
+      csv "$BUCKET"; printf ','
+      csv "Inactive"
+      printf '\n'
+      } >> "$OUTFILE"
+    fi
+  done
+done
+
+echo "✅ Report generated: $OUTFILE"
