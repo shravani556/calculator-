@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MIN_DAYS="${MIN_DAYS:-30}"
+MAX_DAYS="${MAX_DAYS:-90}"
+OUT="${OUT:-inactive_vms_${MIN_DAYS}to${MAX_DAYS}days.csv}"
+
+# Prereqs
+command -v az >/dev/null || { echo "Azure CLI (az) not found"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
+
+az account show >/dev/null
+
+# Ensure resource graph extension exists
+az extension add -n resource-graph --only-show-errors >/dev/null 2>&1 || true
+
+# Build a subscriptionId -> subscriptionName mapping file (TSV)
+SUBMAP="$(mktemp)"
+trap 'rm -f "$SUBMAP"' EXIT
+az account list --query "[].[id,name]" -o tsv > "$SUBMAP"
+
+sub_name() {
+  local sid="$1"
+  awk -v s="$sid" '$1==s{print $2; exit}' "$SUBMAP"
+}
+
+csv_escape() {
+  local s="$1"
+  s="${s//\"/\"\"}"
+  printf "\"%s\"" "$s"
+}
+
+# Header
+echo "subscriptionId,subscriptionName,resourceGroup,vmName,location,vmSize,powerState,lastInactiveDate,daysInactive" > "$OUT"
+
+# Resource Graph query: get stopped/deallocated VMs
+QUERY="
+Resources
+| where type =~ 'microsoft.compute/virtualmachines'
+| extend vmSize = tostring(properties.hardwareProfile.vmSize)
+| extend powerState = tostring(properties.extended.instanceView.powerState.code)
+| where powerState has 'deallocated' or powerState has 'stopped'
+| project id, subscriptionId, resourceGroup, name, location, vmSize, powerState
+"
+
+FIRST=1000
+SKIP=0
+
+while :; do
+  PAGE_TSV="$(az graph query -q "$QUERY" --first "$FIRST" --skip "$SKIP" \
+    --query "data[]. [id, subscriptionId, resourceGroup, name, location, vmSize, powerState]" -o tsv)"
+
+  [[ -z "$PAGE_TSV" ]] && break
+
+  while IFS=$'\t' read -r rid sid rg name loc size state; do
+    [[ -z "${sid:-}" || -z "${rid:-}" ]] && continue
+
+    sname="$(sub_name "$sid")"
+
+    # Get most recent stop/deallocate event timestamp within last MAX_DAYS
+    last="$(az monitor activity-log list \
+      --subscription "$sid" \
+      --resource-id "$rid" \
+      --offset "${MAX_DAYS}d" \
+      --status Succeeded \
+      --query "[?authorization.action=='Microsoft.Compute/virtualMachines/deallocate/action' || authorization.action=='Microsoft.Compute/virtualMachines/powerOff/action'] | sort_by(@,&eventTimestamp) | [-1].eventTimestamp" \
+      -o tsv 2>/dev/null || true)"
+
+    [[ -z "$last" ]] && continue
+
+    # Compute days difference (UTC) using python3 (mac-safe)
+    days="$(python3 - <<PY
+from datetime import datetime, timezone
+s = "$last".strip()
+if not s:
+    print("")
+    raise SystemExit
+# Normalize Z
+if s.endswith("Z"):
+    s = s[:-1] + "+00:00"
+try:
+    ts = datetime.fromisoformat(s)
+except Exception:
+    print("")
+    raise SystemExit
+now = datetime.now(timezone.utc)
+if ts.tzinfo is None:
+    ts = ts.replace(tzinfo=timezone.utc)
+delta = now - ts.astimezone(timezone.utc)
+print(int(delta.total_seconds() // 86400))
+PY
+)"
+
+    [[ -z "$days" ]] && continue
+
+    if (( days >= MIN_DAYS && days <= MAX_DAYS )); then
+      printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+        "$(csv_escape "$sid")" \
+        "$(csv_escape "$sname")" \
+        "$(csv_escape "$rg")" \
+        "$(csv_escape "$name")" \
+        "$(csv_escape "$loc")" \
+        "$(csv_escape "$size")" \
+        "$(csv_escape "$state")" \
+        "$(csv_escape "$last")" \
+        "$(csv_escape "$days")" \
+        >> "$OUT"
+    fi
+  done <<< "$PAGE_TSV"
+
+  SKIP=$((SKIP + FIRST))
+done
+
+echo "Done. CSV written to: $OUT"
