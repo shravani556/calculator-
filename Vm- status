@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+########################################
+# Config
+########################################
+WINDOW_DAYS=90
+CPU_THRESHOLD=5
+METRIC_NAME="Percentage CPU"
+
+########################################
+# Time window (GNU date vs macOS/BSD date)
+########################################
+if date -u -d "1 day ago" "+%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1; then
+  END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  START_TIME=$(date -u -d "${WINDOW_DAYS} days ago" +"%Y-%m-%dT%H:%M:%SZ")
+else
+  END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  START_TIME=$(date -u -v-"${WINDOW_DAYS}"d +"%Y-%m-%dT%H:%M:%SZ")
+fi
+
+########################################
+# CSV helper
+########################################
+csv_escape() {
+  local s=${1//\"/\"\"}
+  printf '"%s"' "$s"
+}
+
+########################################
+# Print CSV header (to stdout)
+########################################
+csv_escape "Subscription";  printf ','
+csv_escape "VMName";        printf ','
+csv_escape "ResourceGroup"; printf ','
+csv_escape "PowerState";    printf ','
+csv_escape "IdleDays";      printf ','
+csv_escape "IdleSince";     printf ','
+csv_escape "VMStatus";      printf ','
+csv_escape "Notes";         printf '\n'
+
+########################################
+# ISO → epoch (GNU + macOS)
+########################################
+iso_to_epoch() {
+  local iso="$1"
+  [[ -z "$iso" ]] && { echo ""; return; }
+
+  if date -d "$iso" +%s >/dev/null 2>&1; then
+    date -d "$iso" +%s
+  else
+    local cleaned="${iso%Z}"
+    date -j -f "%Y-%m-%dT%H:%M:%S" "$cleaned" +%s 2>/dev/null || echo ""
+  fi
+}
+
+########################################
+# Process VMs in a subscription
+########################################
+process_subscription_vms() {
+  local SUB_NAME="$1"
+
+  # Get VM list once; if auth fails, skip this subscription
+  local VMS_FILE
+  VMS_FILE=$(mktemp)
+
+  if ! az vm list -d -o tsv --query '[].{name:name, rg:resourceGroup, state:powerState, id:id}' > "$VMS_FILE" 2>>/dev/stderr; then
+    echo "WARN: Failed to list VMs for subscription '$SUB_NAME' (auth/MFA?) – skipping." >&2
+    rm -f "$VMS_FILE"
+    return
+  fi
+
+  while IFS=$'\t' read -r VM_NAME RG STATE VM_ID; do
+    [[ -z "$VM_NAME" ]] && continue
+
+    POWER_STATE=$(echo "$STATE" | awk '{print $2}')
+    IDLE_DAYS="N/A"
+    IDLE_SINCE="N/A"
+    NOTES=""
+    VM_STATUS="NotRunning"
+
+    if [[ "$POWER_STATE" == "running" ]]; then
+      VM_STATUS="Unknown"
+
+      METRICS_JSON=$(az monitor metrics list \
+        --resource "$VM_ID" \
+        --metrics "$METRIC_NAME" \
+        --aggregation Average \
+        --interval PT1H \
+        --start-time "$START_TIME" \
+        --end-time "$END_TIME" \
+        -o json 2>>/dev/stderr)
+
+      if [[ $? -ne 0 ]]; then
+        IDLE_DAYS="Unknown"
+        IDLE_SINCE="Unknown"
+        VM_STATUS="NoMetrics"
+        NOTES="Failed to read metrics (auth/permissions?)"
+      else
+        HAS_DATA=$(echo "$METRICS_JSON" | jq -r '
+          if (.value|length == 0) or (.value[0].timeseries|length == 0) then
+            "no"
+          else
+            "yes"
+          end
+        ')
+
+        if [[ "$HAS_DATA" == "no" ]]; then
+          IDLE_DAYS="Unknown"
+          IDLE_SINCE="Unknown"
+          VM_STATUS="NoMetrics"
+          NOTES="No CPU metrics (diagnostics/permissions?)"
+        else
+          LAST_POINT=$(echo "$METRICS_JSON" | jq -r '
+            .value[0].timeseries[0].data
+            | map(select(.average != null))
+            | sort_by(.timeStamp)
+            | (last // empty)
+          ')
+
+          LAST_AVG=$(echo "$LAST_POINT" | jq -r '.average // ""')
+          LAST_TIME=$(echo "$LAST_POINT" | jq -r '.timeStamp // ""')
+
+          LAST_ACTIVE_TIME=$(echo "$METRICS_JSON" | jq --arg thr "$CPU_THRESHOLD" -r '
+            .value[0].timeseries[0].data
+            | map(select(.average != null and .average >= ($thr|tonumber)))
+            | sort_by(.timeStamp)
+            | (last // {timeStamp:"NONE_ACTIVE"})
+            | .timeStamp
+          ')
+
+          if [[ -z "$LAST_AVG" || -z "$LAST_TIME" ]]; then
+            IDLE_DAYS="Unknown"
+            IDLE_SINCE="Unknown"
+            VM_STATUS="NoMetrics"
+            NOTES="No non-null CPU samples in last '"$WINDOW_DAYS"'d"
+          else
+            IS_CURRENTLY_IDLE="no"
+            if command -v bc >/dev/null 2>&1; then
+              cmp=$(echo "$LAST_AVG < $CPU_THRESHOLD" | bc -l 2>/dev/null)
+              [[ "$cmp" == "1" ]] && IS_CURRENTLY_IDLE="yes"
+            fi
+
+            NOW_EPOCH=$(date -u +%s)
+
+            if [[ "$LAST_ACTIVE_TIME" == "NONE_ACTIVE" ]]; then
+              IDLE_DAYS=">=${WINDOW_DAYS}"
+              IDLE_SINCE="$START_TIME"
+              VM_STATUS="Zombie"
+              NOTES="No CPU >= ${CPU_THRESHOLD}% in last ${WINDOW_DAYS}d (fully idle)"
+            else
+              LAST_ACTIVE_EPOCH=$(iso_to_epoch "$LAST_ACTIVE_TIME")
+              if [[ -n "$LAST_ACTIVE_EPOCH" ]]; then
+                IDLE_DAYS=$(( (NOW_EPOCH - LAST_ACTIVE_EPOCH) / 86400 ))
+              else
+                IDLE_DAYS="Unknown"
+              fi
+
+              IDLE_SINCE="$LAST_ACTIVE_TIME"
+
+              if [[ "$IS_CURRENTLY_IDLE" == "yes" ]]; then
+                VM_STATUS="Idle"
+                NOTES="Currently idle; last active >= ${CPU_THRESHOLD}% at ${LAST_ACTIVE_TIME}"
+              else
+                VM_STATUS="Active"
+                NOTES="Currently active; last sample ${LAST_AVG}% at ${LAST_TIME}"
+              fi
+            fi
+          fi
+        fi
+      fi
+    else
+      IDLE_DAYS="N/A"
+      IDLE_SINCE="N/A"
+      VM_STATUS="NotRunning"
+      NOTES="VM not running (power state: ${POWER_STATE})"
+    fi
+
+    csv_escape "$SUB_NAME";     printf ','
+    csv_escape "$VM_NAME";      printf ','
+    csv_escape "$RG";           printf ','
+    csv_escape "$POWER_STATE";  printf ','
+    csv_escape "$IDLE_DAYS";    printf ','
+    csv_escape "$IDLE_SINCE";   printf ','
+    csv_escape "$VM_STATUS";    printf ','
+    csv_escape "$NOTES";        printf '\n'
+  done < "$VMS_FILE"
+
+  rm -f "$VMS_FILE"
+}
+
+########################################
+# Loop over all enabled subscriptions
+########################################
+az account list -o tsv --query '[?state==`Enabled`].[id,name]' 2>>/dev/stderr | \
+while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  [[ -z "$SUB_ID" ]] && continue
+  echo "Processing subscription: ${SUB_NAME} (${SUB_ID})" >&2
+
+  if ! az account set --subscription "$SUB_ID" >/dev/null 2>>/dev/stderr; then
+    echo "WARN: Failed to set subscription '$SUB_NAME' – skipping (auth/MFA?)." >&2
+    continue
+  fi
+
+  process_subscription_vms "$SUB_NAME"
+done
