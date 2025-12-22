@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Generate a detailed CSV report of all Azure Virtual WANs across all subscriptions.
+# Each VNet connection gets its own row for better analysis.
+
+set -uo pipefail  # no -e so we can skip problematic subscriptions
+
+# Output file with timestamp
+OUTPUT_FILE="azure_vwan_report_$(date +%Y%m%d_%H%M%S).csv"
+
+>&2 echo "=========================================="
+>&2 echo "Azure Virtual WAN Report Generator"
+>&2 echo "Output file: $OUTPUT_FILE"
+>&2 echo "=========================================="
+>&2 echo ""
+
+# CSV header - one row per VNet connection
+echo "subscriptionId,subscriptionName,vwanName,vwanId,location,virtualHubName,vnetConnectionName,vnetName,vpnSitesCount,vpnSiteNames,vpnGatewayCount,vpnGatewayNames,vpnGatewayConnectionSummary,p2sVpnGatewayCount,p2sVpnGatewayNames,inUse" > "$OUTPUT_FILE"
+
+# Iterate all subscriptions
+az account list --query "[].{id:id,name:name}" -o tsv | while IFS=$'\t' read -r SUB_ID SUB_NAME; do
+  >&2 echo "------------------------------------------------------------"
+  >&2 echo "Processing subscription: $SUB_NAME ($SUB_ID)"
+
+  if ! az account set --subscription "$SUB_ID" 2>/dev/null; then
+    >&2 echo "  [WARN] Cannot set subscription $SUB_ID – skipping."
+    continue
+  fi
+
+  # Get all relevant resources in this subscription
+  VWANS_JSON="$(az network vwan list -o json 2>/dev/null || echo "[]")"
+  VHUBS_JSON="$(az network vhub list -o json 2>/dev/null || echo "[]")"
+  VPN_GW_JSON="$(az network vpn-gateway list -o json 2>/dev/null || echo "[]")"
+  P2S_GW_JSON="$(az network p2s-vpn-gateway list -o json 2>/dev/null || echo "[]")"
+  VPN_SITE_JSON="$(az network vpn-site list -o json 2>/dev/null || echo "[]")"
+
+  # If no vWANs in this subscription, skip
+  if [[ "$(echo "$VWANS_JSON" | jq 'length')" -eq 0 ]]; then
+    >&2 echo "  No vWANs found in this subscription."
+    continue
+  fi
+
+  # Loop over each vWAN in this subscription
+  echo "$VWANS_JSON" | jq -r '.[] | @base64' | while read -r VWAN_B64; do
+
+    # Helper to decode the base64-encoded vWAN JSON
+    _vw() {
+      echo "$VWAN_B64" | base64 --decode | jq -r "$1"
+    }
+
+    VWAN_ID=$(_vw '.id')
+    VWAN_NAME=$(_vw '.name')
+    VWAN_LOCATION=$(_vw '.location')
+
+    >&2 echo "  vWAN: $VWAN_NAME ($VWAN_ID)"
+
+    # Virtual hubs belonging to this vWAN
+    VHUBS_FOR_VWAN="$(echo "$VHUBS_JSON" | jq --arg vwanId "$VWAN_ID" '[.[] | select(.virtualWan.id == $vwanId)]')"
+
+    # VPN sites attached directly to this vWAN
+    VPN_SITE_FOR_VWAN="$(echo "$VPN_SITE_JSON" | jq --arg vwanId "$VWAN_ID" '[.[] | select(.virtualWan.id == $vwanId)]')"
+    VPN_SITE_COUNT="$(echo "$VPN_SITE_FOR_VWAN" | jq 'length')"
+    VPN_SITE_NAMES="$(echo "$VPN_SITE_FOR_VWAN" | jq -r '.[].name' | paste -sd';' - 2>/dev/null || echo "")"
+
+    # VPN gateways associated with hubs of this vWAN
+    VPN_GW_FOR_VWAN="$(echo "$VPN_GW_JSON" | jq --argjson hubs "$VHUBS_FOR_VWAN" '
+      . as $gws
+      | $hubs
+      | [ .[] | .id ] as $hubIds
+      | $gws
+      | [ .[] | select(.virtualHub.id as $hid | $hubIds | index($hid)) ]
+    ')"
+    VPN_GW_COUNT="$(echo "$VPN_GW_FOR_VWAN" | jq 'length')"
+    VPN_GW_NAMES="$(echo "$VPN_GW_FOR_VWAN" | jq -r '.[].name' | paste -sd';' - 2>/dev/null || echo "")"
+    VPN_GW_CONN_SUMMARY="$(echo "$VPN_GW_FOR_VWAN" | jq -r '.[] | "\(.name)(\(.connections | length))"' | paste -sd';' - 2>/dev/null || echo "")"
+
+    # P2S VPN gateways associated with hubs of this vWAN
+    P2S_GW_FOR_VWAN="$(echo "$P2S_GW_JSON" | jq --argjson hubs "$VHUBS_FOR_VWAN" '
+      . as $gws
+      | $hubs
+      | [ .[] | .id ] as $hubIds
+      | $gws
+      | [ .[] | select(.virtualHub.id as $hid | $hubIds | index($hid)) ]
+    ')"
+    P2S_GW_COUNT="$(echo "$P2S_GW_FOR_VWAN" | jq 'length')"
+    P2S_GW_NAMES="$(echo "$P2S_GW_FOR_VWAN" | jq -r '.[].name' | paste -sd';' - 2>/dev/null || echo "")"
+
+    # Clean common fields
+    VPN_SITE_NAMES_CLEAN="$(echo "$VPN_SITE_NAMES" | tr '\n' ' ')"
+    VPN_GW_NAMES_CLEAN="$(echo "$VPN_GW_NAMES" | tr '\n' ' ')"
+    VPN_GW_CONN_SUMMARY_CLEAN="$(echo "$VPN_GW_CONN_SUMMARY" | tr '\n' ' ')"
+    P2S_GW_NAMES_CLEAN="$(echo "$P2S_GW_NAMES" | tr '\n' ' ')"
+
+    # Track if we've output any rows for this vWAN
+    ROWS_OUTPUT=0
+
+    # Loop through each hub and its connections
+    while IFS=$'\t' read -r HUB_NAME HUB_RG; do
+      [[ -z "$HUB_NAME" ]] && continue
+
+      >&2 echo "    Checking vHub: $HUB_NAME (RG: $HUB_RG)"
+      CONNS_JSON="$(az network vhub connection list --resource-group "$HUB_RG" --vhub-name "$HUB_NAME" -o json 2>/dev/null || echo "[]")"
+      
+      # If this hub has connections, output one row per connection
+      if [[ "$(echo "$CONNS_JSON" | jq 'length')" -gt 0 ]]; then
+        echo "$CONNS_JSON" | jq -r '.[] | @base64' | while read -r CONN_B64; do
+          CONN_NAME="$(echo "$CONN_B64" | base64 --decode | jq -r '.name')"
+          VNET_ID="$(echo "$CONN_B64" | base64 --decode | jq -r '.remoteVirtualNetwork.id // ""')"
+          VNET_NAME="$(echo "$VNET_ID" | awk -F/ '{print $NF}')"
+
+          # Output one row for this VNet connection
+          printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
+            "$SUB_ID" \
+            "$SUB_NAME" \
+            "$VWAN_NAME" \
+            "$VWAN_ID" \
+            "$VWAN_LOCATION" \
+            "$HUB_NAME" \
+            "$CONN_NAME" \
+            "$VNET_NAME" \
+            "$VPN_SITE_COUNT" \
+            "$VPN_SITE_NAMES_CLEAN" \
+            "$VPN_GW_COUNT" \
+            "$VPN_GW_NAMES_CLEAN" \
+            "$VPN_GW_CONN_SUMMARY_CLEAN" \
+            "$P2S_GW_COUNT" \
+            "$P2S_GW_NAMES_CLEAN" \
+            "Yes" >> "$OUTPUT_FILE"
+          
+          ROWS_OUTPUT=$((ROWS_OUTPUT + 1))
+        done
+      fi
+    done < <(echo "$VHUBS_FOR_VWAN" | jq -r '.[] | [.name, .resourceGroup] | @tsv')
+
+    # If no connections found but vWAN exists, output one summary row
+    if [[ $ROWS_OUTPUT -eq 0 ]]; then
+      IN_USE="No"
+      if (( VPN_SITE_COUNT > 0 || VPN_GW_COUNT > 0 || P2S_GW_COUNT > 0 )); then
+        IN_USE="Yes"
+      fi
+
+      VHUB_NAMES="$(echo "$VHUBS_FOR_VWAN" | jq -r '.[].name' | paste -sd';' - 2>/dev/null || echo "")"
+      
+      printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
+        "$SUB_ID" \
+        "$SUB_NAME" \
+        "$VWAN_NAME" \
+        "$VWAN_ID" \
+        "$VWAN_LOCATION" \
+        "$VHUB_NAMES" \
+        "" \
+        "" \
+        "$VPN_SITE_COUNT" \
+        "$VPN_SITE_NAMES_CLEAN" \
+        "$VPN_GW_COUNT" \
+        "$VPN_GW_NAMES_CLEAN" \
+        "$VPN_GW_CONN_SUMMARY_CLEAN" \
+        "$P2S_GW_COUNT" \
+        "$P2S_GW_NAMES_CLEAN" \
+        "$IN_USE" >> "$OUTPUT_FILE"
+    fi
+
+  done
+
+done
+
+>&2 echo ""
+>&2 echo "=========================================="
+>&2 echo "Report generation complete!"
+>&2 echo "Output saved to: $OUTPUT_FILE"
+>&2 echo "=========================================="
