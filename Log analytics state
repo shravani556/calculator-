@@ -1,0 +1,15 @@
+union withsource = WorkspaceName *
+| summarize
+    LastLogTime = max(TimeGenerated),
+    TotalLogs   = count()
+    by WorkspaceName
+| extend
+    DaysInactive = datetime_diff("day", now(), LastLogTime),
+    Status = iff(LastLogTime < ago(90d), "NOT IN USE", "IN USE")
+| project
+    WorkspaceName,
+    LastLogTime,
+    DaysInactive,
+    TotalLogs,
+    Status
+| order by DaysInactive desc
