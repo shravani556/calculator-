@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTDIR="./reports"
+TS=$(date -u +%Y%m%d_%H%M%S)
+OUTFILE="$OUTDIR/all_eventhubs_$TS.csv"
+
+mkdir -p "$OUTDIR"
+
+echo "SubscriptionId,SubscriptionName,ResourceGroup,NamespaceName,EventHubName,Location,Status,PartitionCount,MessageRetentionInDays,CaptureEnabled,CreatedAt" \
+  > "$OUTFILE"
+
+az account list --query "[?state=='Enabled']" -o json | jq -c '.[]' | while read -r sub; do
+  sub_id=$(echo "$sub" | jq -r '.id')
+  sub_name=$(echo "$sub" | jq -r '.name')
+
+  az account set --subscription "$sub_id" >/dev/null
+
+  az eventhubs namespace list -o json | jq -c '.[]' | while read -r ns; do
+    rg=$(echo "$ns" | jq -r '.resourceGroup')
+    ns_name=$(echo "$ns" | jq -r '.name')
+    location=$(echo "$ns" | jq -r '.location')
+
+    az eventhubs eventhub list \
+      -g "$rg" \
+      --namespace-name "$ns_name" -o json | jq -c '.[]' | while read -r eh; do
+
+      eh_name=$(echo "$eh" | jq -r '.name')
+
+      eh_show=$(az eventhubs eventhub show \
+        -g "$rg" \
+        --namespace-name "$ns_name" \
+        --name "$eh_name" -o json)
+
+      status=$(echo "$eh_show" | jq -r '.properties.status // ""')
+      partitions=$(echo "$eh_show" | jq -r '.properties.partitionCount // ""')
+      retention=$(echo "$eh_show" | jq -r '.properties.messageRetentionInDays // ""')
+      capture=$(echo "$eh_show" | jq -r '.properties.captureDescription.enabled // ""')
+      created=$(echo "$eh_show" | jq -r '.systemData.createdAt // ""')
+
+      echo "\"$sub_id\",\"$sub_name\",\"$rg\",\"$ns_name\",\"$eh_name\",\"$location\",\"$status\",\"$partitions\",\"$retention\",\"$capture\",\"$created\"" \
+        >> "$OUTFILE"
+    done
+  done
+done
+
+echo "Done. Output: $OUTFILE"
