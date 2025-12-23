@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTFILE="eventhubs_all.csv"
+
+echo "SubscriptionName,SubscriptionId,ResourceGroup,Namespace,EventHubName,Location,PartitionCount,RetentionDays,Status" > "$OUTFILE"
+
+# Loop all enabled subscriptions
+az account list --query "[?state=='Enabled']" -o json | jq -c '.[]' | while read -r sub; do
+  SUB_ID=$(echo "$sub" | jq -r '.id')
+  SUB_NAME=$(echo "$sub" | jq -r '.name')
+
+  az account set --subscription "$SUB_ID"
+
+  # List Event Hub namespaces
+  az eventhubs namespace list -o json | jq -c '.[]' | while read -r ns; do
+    RG=$(echo "$ns" | jq -r '.resourceGroup')
+    NS_NAME=$(echo "$ns" | jq -r '.name')
+    LOCATION=$(echo "$ns" | jq -r '.location')
+    STATUS=$(echo "$ns" | jq -r '.status')
+
+    # List Event Hubs inside namespace
+    az eventhubs eventhub list \
+      --resource-group "$RG" \
+      --namespace-name "$NS_NAME" \
+      -o json | jq -c '.[]' | while read -r eh; do
+
+        EH_NAME=$(echo "$eh" | jq -r '.name')
+        PARTITIONS=$(echo "$eh" | jq -r '.partitionCount')
+        RETENTION=$(echo "$eh" | jq -r '.messageRetentionInDays')
+
+        echo "$SUB_NAME,$SUB_ID,$RG,$NS_NAME,$EH_NAME,$LOCATION,$PARTITIONS,$RETENTION,$STATUS" >> "$OUTFILE"
+    done
+  done
+done
+
+echo "✔ Event Hub inventory completed → $OUTFILE"
