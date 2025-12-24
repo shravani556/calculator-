@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# Log Analytics Workspace Activity Analyzer
+# This script checks Azure Log Analytics workspaces for log activity
+# Shows last log date and identifies active days in the past 90 days
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Check if Azure CLI is installed
+if ! command -v az &> /dev/null; then
+    echo -e "${RED}Error: Azure CLI is not installed${NC}"
+    echo "Please install it from: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+    exit 1
+fi
+
+# Check if logged in
+if ! az account show &> /dev/null; then
+    echo -e "${RED}Error: Not logged in to Azure${NC}"
+    echo "Please run: az login"
+    exit 1
+fi
+
+echo -e "${BLUE}=== Log Analytics Workspace Activity Report ===${NC}\n"
+
+# Get current subscription
+SUBSCRIPTION=$(az account show --query name -o tsv)
+echo -e "${GREEN}Subscription: ${SUBSCRIPTION}${NC}\n"
+
+# Calculate date 90 days ago
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    START_DATE=$(date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
+else
+    # Linux
+    START_DATE=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ')
+fi
+
+END_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+echo -e "${YELLOW}Analyzing log activity from ${START_DATE} to ${END_DATE}${NC}\n"
+
+# Get all Log Analytics workspaces
+WORKSPACES=$(az monitor log-analytics workspace list --query "[].{id:id,name:name,resourceGroup:resourceGroup}" -o json)
+
+if [ -z "$WORKSPACES" ] || [ "$WORKSPACES" == "[]" ]; then
+    echo -e "${RED}No Log Analytics workspaces found in this subscription${NC}"
+    exit 0
+fi
+
+# Process each workspace
+echo "$WORKSPACES" | jq -c '.[]' | while read -r workspace; do
+    WORKSPACE_NAME=$(echo "$workspace" | jq -r '.name')
+    RESOURCE_GROUP=$(echo "$workspace" | jq -r '.resourceGroup')
+    WORKSPACE_ID=$(echo "$workspace" | jq -r '.id')
+    
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}Workspace: ${WORKSPACE_NAME}${NC}"
+    echo -e "${GREEN}Resource Group: ${RESOURCE_GROUP}${NC}"
+    echo ""
+    
+    # Query for last log entry across all tables
+    QUERY="union withsource=TableName *
+| summarize LastLog = max(TimeGenerated)
+| project LastLog"
+    
+    echo "  Querying for last log entry..."
+    LAST_LOG=$(az monitor log-analytics query -w "$WORKSPACE_ID" --analytics-query "$QUERY" --timespan P90D -o json 2>/dev/null || echo "[]")
+    
+    if [ "$LAST_LOG" != "[]" ] && [ "$(echo "$LAST_LOG" | jq length)" -gt 0 ]; then
+        LAST_LOG_DATE=$(echo "$LAST_LOG" | jq -r '.[0].LastLog' 2>/dev/null)
+        
+        if [ "$LAST_LOG_DATE" != "null" ] && [ -n "$LAST_LOG_DATE" ]; then
+            echo -e "  ${GREEN}✓ Last Log Date: ${LAST_LOG_DATE}${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ No logs found in the past 90 days${NC}"
+        fi
+    else
+        echo -e "  ${YELLOW}⚠ No logs found in the past 90 days${NC}"
+    fi
+    
+    # Query for active days in last 90 days
+    ACTIVE_DAYS_QUERY="union withsource=TableName *
+| where TimeGenerated >= ago(90d)
+| summarize by bin(TimeGenerated, 1d)
+| count"
+    
+    echo "  Analyzing activity over 90 days..."
+    ACTIVE_DAYS=$(az monitor log-analytics query -w "$WORKSPACE_ID" --analytics-query "$ACTIVE_DAYS_QUERY" -o json 2>/dev/null || echo "[]")
+    
+    if [ "$ACTIVE_DAYS" != "[]" ] && [ "$(echo "$ACTIVE_DAYS" | jq length)" -gt 0 ]; then
+        DAYS_COUNT=$(echo "$ACTIVE_DAYS" | jq -r '.[0].Count' 2>/dev/null)
+        
+        if [ "$DAYS_COUNT" != "null" ] && [ -n "$DAYS_COUNT" ]; then
+            PERCENTAGE=$(echo "scale=1; ($DAYS_COUNT / 90) * 100" | bc 2>/dev/null || echo "0")
+            echo -e "  ${GREEN}✓ Active Days (last 90d): ${DAYS_COUNT}/90 (${PERCENTAGE}%)${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ No activity in the past 90 days${NC}"
+        fi
+    else
+        echo -e "  ${YELLOW}⚠ No activity in the past 90 days${NC}"
+    fi
+    
+    # Get top tables by record count
+    TOP_TABLES_QUERY="union withsource=TableName *
+| where TimeGenerated >= ago(90d)
+| summarize RecordCount = count() by TableName
+| top 5 by RecordCount desc"
+    
+    echo "  Retrieving top active tables..."
+    TOP_TABLES=$(az monitor log-analytics query -w "$WORKSPACE_ID" --analytics-query "$TOP_TABLES_QUERY" -o json 2>/dev/null || echo "[]")
+    
+    if [ "$TOP_TABLES" != "[]" ] && [ "$(echo "$TOP_TABLES" | jq length)" -gt 0 ]; then
+        echo -e "\n  ${BLUE}Top 5 Most Active Tables:${NC}"
+        echo "$TOP_TABLES" | jq -r '.[] | "    • \(.TableName): \(.RecordCount) records"' 2>/dev/null
+    fi
+    
+    echo ""
+done
+
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}Analysis complete!${NC}"
