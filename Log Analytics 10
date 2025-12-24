@@ -1,0 +1,215 @@
+#!/bin/bash
+# JIRA: MSAZ-12546 - Evaluate all Log Analytics Workspaces (Legacy & vNext)
+# Find which workspaces have NO logs/metrics in the past 90 days
+set -e
+OUTPUT_FILE="LAW_Evaluation_Legacy_vNext_$(date +%Y%m%d_%H%M%S).csv"
+SUMMARY_FILE="LAW_Summary_$(date +%Y%m%d_%H%M%S).txt"
+TEMP_DIR="/tmp/law_eval_$$"
+mkdir -p "$TEMP_DIR"
+DAYS_TO_CHECK=90
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+echo "============================================================================="
+echo "JIRA: MSAZ-12546 - Log Analytics Workspaces Evaluation"
+echo "============================================================================="
+echo "Evaluating all Log Analytics Workspaces (Legacy and vNext)"
+echo "Finding workspaces with NO activity in the past $DAYS_TO_CHECK days"
+echo ""
+if ! command -v az &> /dev/null; then
+    echo -e "${RED}Error: Azure CLI is not installed${NC}"
+    exit 1
+fi
+if ! az account show &> /dev/null; then
+    echo -e "${RED}Error: Not logged into Azure${NC}"
+    exit 1
+fi
+echo "SubscriptionName,SubscriptionId,WorkspaceName,WorkspaceType,ResourceGroup,Location,ProvisioningState,SKU,RetentionDays,CreatedDate,HasAnyData,TotalTables,TablesWithData,LastLogDate,DaysSinceLastLog,TotalLogEntries,UsageStatus,Recommendation,MonthlyCostEstimate" > "$OUTPUT_FILE"
+echo "Fetching all subscriptions..."
+az account list --query "[?state=='Enabled'].[name,id]" -o tsv > "$TEMP_DIR/subscriptions.txt"
+TOTAL_SUBS=$(wc -l < "$TEMP_DIR/subscriptions.txt")
+echo -e "${CYAN}Found $TOTAL_SUBS enabled subscription(s)${NC}"
+echo ""
+TOTAL_WORKSPACES=0
+LEGACY_COUNT=0
+VNEXT_COUNT=0
+ACTIVE_COUNT=0
+INACTIVE_COUNT=0
+NO_DATA_COUNT=0
+echo "=============================================================================" > "$SUMMARY_FILE"
+echo "Log Analytics Workspaces Evaluation Report" >> "$SUMMARY_FILE"
+echo "Generated: $(date)" >> "$SUMMARY_FILE"
+echo "=============================================================================" >> "$SUMMARY_FILE"
+echo "" >> "$SUMMARY_FILE"
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+    echo "============================================================================="
+    echo -e "${BLUE}Subscription: $SUB_NAME${NC}"
+    echo "============================================================================="
+    echo "" >> "$SUMMARY_FILE"
+    echo "Subscription: $SUB_NAME" >> "$SUMMARY_FILE"
+    echo "-----------------------------------------------------------------------------" >> "$SUMMARY_FILE"
+    az account set --subscription "$SUB_ID" 2>/dev/null || continue
+    echo "Fetching Log Analytics Workspaces..."
+    az monitor log-analytics workspace list -o json > "$TEMP_DIR/workspaces_${SUB_ID}.json" 2>/dev/null || echo "[]" > "$TEMP_DIR/workspaces_${SUB_ID}.json"
+    WS_COUNT=$(jq '. | length' "$TEMP_DIR/workspaces_${SUB_ID}.json")
+    if [ "$WS_COUNT" -eq 0 ]; then
+        echo "No Log Analytics Workspaces found"
+        echo "  No workspaces found" >> "$SUMMARY_FILE"
+        echo ""
+        continue
+    fi
+    echo -e "${CYAN}Found $WS_COUNT workspace(s)${NC}"
+    echo "  Found $WS_COUNT workspace(s)" >> "$SUMMARY_FILE"
+    echo ""
+    TOTAL_WORKSPACES=$((TOTAL_WORKSPACES + WS_COUNT))
+    jq -c '.[]' "$TEMP_DIR/workspaces_${SUB_ID}.json" | while read -r workspace; do
+        WS_NAME=$(echo "$workspace" | jq -r '.name')
+        WS_ID=$(echo "$workspace" | jq -r '.id')
+        WS_RG=$(echo "$workspace" | jq -r '.resourceGroup')
+        WS_LOCATION=$(echo "$workspace" | jq -r '.location')
+        WS_STATE=$(echo "$workspace" | jq -r '.provisioningState')
+        WS_SKU=$(echo "$workspace" | jq -r '.sku.name // "Unknown"')
+        WS_RETENTION=$(echo "$workspace" | jq -r '.retentionInDays // 30')
+        WS_CREATED=$(echo "$workspace" | jq -r '.createdDate // "Unknown"')
+        WS_TYPE="Legacy"
+        RESOURCE_PERMISSIONS=$(echo "$workspace" | jq -r '.properties.features.enableLogAccessUsingOnlyResourcePermissions // false')
+        if [ "$RESOURCE_PERMISSIONS" == "true" ]; then
+            WS_TYPE="vNext"
+            VNEXT_COUNT=$((VNEXT_COUNT + 1))
+        else
+            LEGACY_COUNT=$((LEGACY_COUNT + 1))
+        fi
+        echo "-----------------------------------------------------------------------------"
+        echo -e "${YELLOW}[$TOTAL_WORKSPACES] Workspace: $WS_NAME${NC}"
+        echo "  Type: ${MAGENTA}$WS_TYPE${NC}"
+        echo "  Resource Group: $WS_RG"
+        echo "  Location: $WS_LOCATION"
+        echo "  State: $WS_STATE"
+        echo "  SKU: $WS_SKU | Retention: $WS_RETENTION days"
+        echo "" >> "$SUMMARY_FILE"
+        echo "  $TOTAL_WORKSPACES. $WS_NAME ($WS_TYPE)" >> "$SUMMARY_FILE"
+        HAS_DATA="No"
+        TOTAL_TABLES=0
+        TABLES_WITH_DATA=0
+        LAST_LOG_DATE="Never"
+        DAYS_SINCE="N/A"
+        TOTAL_LOG_ENTRIES=0
+        USAGE_STATUS="NO_DATA"
+        RECOMMENDATION="Review for deletion"
+        COST_ESTIMATE="TBD"
+        echo "  Checking for data in workspace..."
+        BASIC_QUERY="search * | take 1 | project TimeGenerated"
+        BASIC_RESULT=$(az monitor log-analytics query -w "$WS_ID" --analytics-query "$BASIC_QUERY" -o json 2>/dev/null || echo "[]")
+        if [ "$(echo "$BASIC_RESULT" | jq '. | length')" -gt 0 ]; then
+            HAS_DATA="Yes"
+            echo -e "  ${GREEN}✓ Workspace has data${NC}"
+            STATS_QUERY="search * | where TimeGenerated > ago(365d) | summarize LastLog = max(TimeGenerated), TotalLogs = count(), Tables = dcount(\$table) | project LastLog, TotalLogs, Tables"
+            STATS_RESULT=$(az monitor log-analytics query -w "$WS_ID" --analytics-query "$STATS_QUERY" -o json 2>/dev/null || echo "[]")
+            if [ "$(echo "$STATS_RESULT" | jq '. | length')" -gt 0 ]; then
+                LAST_LOG_DATE=$(echo "$STATS_RESULT" | jq -r '.[0].LastLog // "Never"')
+                TOTAL_LOG_ENTRIES=$(echo "$STATS_RESULT" | jq -r '.[0].TotalLogs // 0')
+                TOTAL_TABLES=$(echo "$STATS_RESULT" | jq -r '.[0].Tables // 0')
+                echo "  Total Tables: $TOTAL_TABLES"
+                echo "  Total Log Entries: $TOTAL_LOG_ENTRIES"
+                if [ "$LAST_LOG_DATE" != "Never" ] && [ "$LAST_LOG_DATE" != "null" ]; then
+                    LAST_LOG_EPOCH=$(date -d "$LAST_LOG_DATE" +%s 2>/dev/null || echo "0")
+                    CURRENT_EPOCH=$(date +%s)
+                    DAYS_SINCE=$((( CURRENT_EPOCH - LAST_LOG_EPOCH ) / 86400))
+                    echo "  Last Log: $LAST_LOG_DATE"
+                    echo "  Days Since Last Log: $DAYS_SINCE"
+                    if [ $DAYS_SINCE -le $DAYS_TO_CHECK ]; then
+                        USAGE_STATUS="ACTIVE"
+                        RECOMMENDATION="Keep - Workspace is actively used"
+                        ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
+                        echo -e "  ${GREEN}✓ ACTIVE - Logs within last $DAYS_TO_CHECK days${NC}"
+                        echo "     Status: ACTIVE (last log: $DAYS_SINCE days ago)" >> "$SUMMARY_FILE"
+                    else
+                        USAGE_STATUS="INACTIVE"
+                        RECOMMENDATION="Consider deletion - No logs for $DAYS_SINCE days"
+                        INACTIVE_COUNT=$((INACTIVE_COUNT + 1))
+                        echo -e "  ${RED}✗ INACTIVE - No logs for $DAYS_SINCE days${NC}"
+                        echo "     Status: INACTIVE (last log: $DAYS_SINCE days ago) ⚠️" >> "$SUMMARY_FILE"
+                    fi
+                else
+                    USAGE_STATUS="INACTIVE"
+                    RECOMMENDATION="Consider deletion - Old data only (>365 days)"
+                    INACTIVE_COUNT=$((INACTIVE_COUNT + 1))
+                    echo -e "  ${RED}✗ INACTIVE - Data exists but older than 365 days${NC}"
+                    echo "     Status: INACTIVE (data older than 365 days) ⚠️" >> "$SUMMARY_FILE"
+                fi
+                RECENT_TABLES_QUERY="search * | where TimeGenerated > ago(${DAYS_TO_CHECK}d) | summarize by \$table | count"
+                TABLES_WITH_DATA=$(az monitor log-analytics query -w "$WS_ID" --analytics-query "$RECENT_TABLES_QUERY" -o json 2>/dev/null | jq -r '.[0].Count // 0' || echo "0")
+                echo "  Tables with Recent Data: $TABLES_WITH_DATA/$TOTAL_TABLES"
+            fi
+        else
+            USAGE_STATUS="NO_DATA"
+            RECOMMENDATION="Delete - Workspace is empty, no data found"
+            NO_DATA_COUNT=$((NO_DATA_COUNT + 1))
+            echo -e "  ${RED}✗ NO DATA - Workspace is completely empty${NC}"
+            echo "     Status: NO DATA (completely empty) ❌" >> "$SUMMARY_FILE"
+        fi
+        echo "$SUB_NAME,$SUB_ID,$WS_NAME,$WS_TYPE,$WS_RG,$WS_LOCATION,$WS_STATE,$WS_SKU,$WS_RETENTION,$WS_CREATED,$HAS_DATA,$TOTAL_TABLES,$TABLES_WITH_DATA,$LAST_LOG_DATE,$DAYS_SINCE,$TOTAL_LOG_ENTRIES,$USAGE_STATUS,$RECOMMENDATION,$COST_ESTIMATE" >> "$OUTPUT_FILE"
+        echo ""
+    done
+    echo ""
+done < "$TEMP_DIR/subscriptions.txt"
+rm -rf "$TEMP_DIR"
+echo "" >> "$SUMMARY_FILE"
+echo "=============================================================================" >> "$SUMMARY_FILE"
+echo "SUMMARY" >> "$SUMMARY_FILE"
+echo "=============================================================================" >> "$SUMMARY_FILE"
+echo "Total Subscriptions Scanned: $TOTAL_SUBS" >> "$SUMMARY_FILE"
+echo "Total Workspaces Found: $TOTAL_WORKSPACES" >> "$SUMMARY_FILE"
+echo "" >> "$SUMMARY_FILE"
+echo "Workspace Types:" >> "$SUMMARY_FILE"
+echo "  - Legacy: $LEGACY_COUNT" >> "$SUMMARY_FILE"
+echo "  - vNext: $VNEXT_COUNT" >> "$SUMMARY_FILE"
+echo "" >> "$SUMMARY_FILE"
+echo "Usage Status:" >> "$SUMMARY_FILE"
+echo "  - ACTIVE (logs < $DAYS_TO_CHECK days): $ACTIVE_COUNT" >> "$SUMMARY_FILE"
+echo "  - INACTIVE (no logs in $DAYS_TO_CHECK+ days): $INACTIVE_COUNT" >> "$SUMMARY_FILE"
+echo "  - NO DATA (completely empty): $NO_DATA_COUNT" >> "$SUMMARY_FILE"
+echo "" >> "$SUMMARY_FILE"
+echo "Workspaces to Review for Deletion: $((INACTIVE_COUNT + NO_DATA_COUNT))" >> "$SUMMARY_FILE"
+echo "=============================================================================" >> "$SUMMARY_FILE"
+echo "============================================================================="
+echo "EVALUATION COMPLETE!"
+echo "============================================================================="
+echo "Total Subscriptions Scanned: $TOTAL_SUBS"
+echo "Total Workspaces Found: $TOTAL_WORKSPACES"
+echo ""
+echo "Workspace Types:"
+echo -e "  ${MAGENTA}Legacy: $LEGACY_COUNT${NC}"
+echo -e "  ${MAGENTA}vNext: $VNEXT_COUNT${NC}"
+echo ""
+echo "Usage Status:"
+echo -e "  ${GREEN}ACTIVE (logs < $DAYS_TO_CHECK days): $ACTIVE_COUNT${NC}"
+echo -e "  ${YELLOW}INACTIVE (no logs in $DAYS_TO_CHECK+ days): $INACTIVE_COUNT${NC}"
+echo -e "  ${RED}NO DATA (completely empty): $NO_DATA_COUNT${NC}"
+echo ""
+echo -e "${RED}⚠️  Workspaces to Review for Deletion: $((INACTIVE_COUNT + NO_DATA_COUNT))${NC}"
+echo ""
+echo "Files Generated:"
+echo "  1. Detailed CSV: $OUTPUT_FILE"
+echo "  2. Summary Report: $SUMMARY_FILE"
+echo ""
+if [ -f "$OUTPUT_FILE" ]; then
+    echo "Workspaces Recommended for Deletion (INACTIVE or NO DATA):"
+    echo "============================================================================="
+    awk -F',' 'NR>1 && ($17=="INACTIVE" || $17=="NO_DATA") {printf "  %-40s | %-8s | %-12s | RG: %-30s | Days: %s\n", $3, $4, $17, $5, $15}' "$OUTPUT_FILE"
+    echo ""
+    echo "Breakdown by Type:"
+    echo "-------------------"
+    echo "Legacy Workspaces:"
+    awk -F',' 'NR>1 && $4=="Legacy" {total++; if($17=="ACTIVE") active++; if($17=="INACTIVE") inactive++; if($17=="NO_DATA") nodata++;} END {printf "  Total: %d | Active: %d | Inactive: %d | No Data: %d\n", total, active+0, inactive+0, nodata+0}' "$OUTPUT_FILE"
+    echo ""
+    echo "vNext Workspaces:"
+    awk -F',' 'NR>1 && $4=="vNext" {total++; if($17=="ACTIVE") active++; if($17=="INACTIVE") inactive++; if($17=="NO_DATA") nodata++;} END {printf "  Total: %d | Active: %d | Inactive: %d | No Data: %d\n", total, active+0, inactive+0, nodata+0}' "$OUTPUT_FILE"
+fi
+echo ""
+echo "============================================================================="
+cat "$SUMMARY_FILE"
