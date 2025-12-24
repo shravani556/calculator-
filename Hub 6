@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------
+# Config (override via env vars)
+# -----------------------------
+DAYS="${DAYS:-90}"                 # set DAYS=60 for 60 days
+INTERVAL="${INTERVAL:-P1D}"        # daily buckets
+METRICS="${METRICS:-IncomingMessages,OutgoingMessages,IncomingBytes,OutgoingBytes}"
+
+# Outputs
+INV_CSV="${INV_CSV:-eventhubs_inventory.csv}"
+DAILY_CSV="${DAILY_CSV:-eventhubs_metrics_daily.csv}"
+SUMMARY_CSV="${SUMMARY_CSV:-eventhubs_usage_summary_${DAYS}d.csv}"
+INUSE_CSV="${INUSE_CSV:-eventhubs_in_use_only.csv}"
+
+# -----------------------------
+# Helpers
+# -----------------------------
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }; }
+info() { echo "[INFO] $*" >&2; }
+warn() { echo "[WARN] $*" >&2; }
+
+iso_utc_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+iso_utc_days_ago() {
+  local days="$1"
+  date -u -v-"${days}"d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${days} days ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 - <<PY
+from datetime import datetime, timezone, timedelta
+print((datetime.now(timezone.utc)-timedelta(days=int("${days}"))).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+csv_escape() {
+  local s="${1:-}"
+  s="${s//\"/\"\"}"
+  printf "\"%s\"" "$s"
+}
+
+# -----------------------------
+# Checks
+# -----------------------------
+need az
+need jq
+
+az extension add --name resource-graph -y >/dev/null 2>&1 || true
+az extension add --name eventhubs -y >/dev/null 2>&1 || true
+
+START_TIME="$(iso_utc_days_ago "$DAYS")"
+END_TIME="$(iso_utc_now)"
+info "Time window: $START_TIME  ->  $END_TIME (last ${DAYS} days)"
+info "Metrics: $METRICS, interval $INTERVAL"
+
+# -----------------------------
+# 1) Get enabled subscriptions
+# -----------------------------
+SUBS_JSON="$(az account list --all -o json)"
+SUB_IDS="$(echo "$SUBS_JSON" | jq -r '.[] | select(.state=="Enabled") | .id')"
+if [[ -z "$SUB_IDS" ]]; then
+  echo "No enabled subscriptions found for this login."
+  exit 1
+fi
+
+# -----------------------------
+# 2) List Event Hub namespaces via Resource Graph
+# -----------------------------
+read -r -d '' NS_QUERY <<'KQL' || true
+resources
+| where type =~ 'microsoft.eventhub/namespaces'
+| project id, name, subscriptionId, resourceGroup, location, sku=tostring(sku.name)
+KQL
+
+info "Querying Resource Graph for Event Hub namespaces..."
+set +e
+NS_OUT="$(az graph query -q "$NS_QUERY" --subscriptions $SUB_IDS -o json 2>.arg_namespaces_err.log)"
+RC=$?
+set -e
+
+if [[ $RC -ne 0 ]]; then
+  warn "Namespace query failed. Check .arg_namespaces_err.log"
+  exit 2
+fi
+
+NS_COUNT="$(echo "$NS_OUT" | jq '.data | length')"
+info "Namespaces found: $NS_COUNT"
+if [[ "$NS_COUNT" -eq 0 ]]; then
+  warn "No Event Hub namespaces found across subscriptions you can see."
+  exit 0
+fi
+
+# -----------------------------
+# Output headers
+# -----------------------------
+echo "subscriptionId,resourceGroup,location,namespace,namespaceSku,eventHub,resourceId,partitionCount,messageRetentionInDays,status,captureEnabled" > "$INV_CSV"
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,metric,day,total,namespaceResourceId" > "$DAILY_CSV"
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,metric,total_${DAYS}d,avg_daily,max_daily,last_nonzero_day,is_in_use,namespaceResourceId" > "$SUMMARY_CSV"
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,metric,total_${DAYS}d,avg_daily,max_daily,last_nonzero_day,is_in_use,namespaceResourceId" > "$INUSE_CSV"
+
+# We accumulate summaries in JSON to avoid bash math pain
+ACC_JSON=".acc_v2.json"
+echo '{}' > "$ACC_JSON"
+
+TOTAL_EH=0
+
+# -----------------------------
+# 3) For each namespace -> list event hubs
+# -----------------------------
+echo "$NS_OUT" | jq -c '.data[]' | while read -r nsrow; do
+  ns_id="$(echo "$nsrow" | jq -r '.id')"
+  ns_name="$(echo "$nsrow" | jq -r '.name')"
+  sub_id="$(echo "$nsrow" | jq -r '.subscriptionId')"
+  rg="$(echo "$nsrow" | jq -r '.resourceGroup')"
+  loc="$(echo "$nsrow" | jq -r '.location')"
+  sku="$(echo "$nsrow" | jq -r '.sku // empty')"
+
+  info "Listing hubs in namespace: $ns_name (sub=$sub_id rg=$rg)"
+
+  set +e
+  EH_LIST="$(az eventhubs eventhub list --subscription "$sub_id" --resource-group "$rg" --namespace-name "$ns_name" -o json 2>>.eventhub_list_err.log)"
+  RC=$?
+  set -e
+  if [[ $RC -ne 0 ]]; then
+    warn "Failed to list hubs for namespace $ns_name (see .eventhub_list_err.log)"
+    continue
+  fi
+
+  EH_COUNT="$(echo "$EH_LIST" | jq 'length')"
+  TOTAL_EH=$((TOTAL_EH + EH_COUNT))
+
+  # For each event hub
+  echo "$EH_LIST" | jq -c '.[]' | while read -r eh; do
+    eh_name="$(echo "$eh" | jq -r '.name')"
+    eh_id="$(echo "$eh" | jq -r '.id')"
+    part="$(echo "$eh" | jq -r '.properties.partitionCount // empty')"
+    reten="$(echo "$eh" | jq -r '.properties.messageRetentionInDays // empty')"
+    status="$(echo "$eh" | jq -r '.properties.status // empty')"
+    cap="$(echo "$eh" | jq -r '.properties.captureDescription.enabled // empty')"
+
+    # Inventory row
+    printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+      "$(csv_escape "$sub_id")" \
+      "$(csv_escape "$rg")" \
+      "$(csv_escape "$loc")" \
+      "$(csv_escape "$ns_name")" \
+      "$(csv_escape "$sku")" \
+      "$(csv_escape "$eh_name")" \
+      "$(csv_escape "$eh_id")" \
+      "$(csv_escape "$part")" \
+      "$(csv_escape "$reten")" \
+      "$(csv_escape "$status")" \
+      "$(csv_escape "$cap")" \
+      >> "$INV_CSV"
+
+    # -----------------------------
+    # 4) Metrics: query on NAMESPACE resource, filter by EntityName == event hub
+    # -----------------------------
+    # Some tenants require quoting like: --filter "EntityName eq 'hubname'"
+    FILTER="EntityName eq '${eh_name}'"
+
+    set +e
+    MET_JSON="$(az monitor metrics list \
+      --resource "$ns_id" \
+      --metrics "$METRICS" \
+      --aggregation Total \
+      --interval "$INTERVAL" \
+      --start-time "$START_TIME" \
+      --end-time "$END_TIME" \
+      --filter "$FILTER" \
+      -o json 2>>.metrics_err.log)"
+    RC=$?
+    set -e
+    if [[ $RC -ne 0 ]]; then
+      warn "Metrics failed for ns=$ns_name hub=$eh_name (see .metrics_err.log). Often needs Monitoring Reader."
+      continue
+    fi
+
+    # Flatten metric points -> DAILY_CSV and update ACC_JSON
+    echo "$MET_JSON" | jq -c '.value[] | {metric:(.name.value), data:(.timeseries[0].data // [])}' | while read -r m; do
+      metric="$(echo "$m" | jq -r '.metric')"
+
+      echo "$m" | jq -c '.data[] | {day:(.timeStamp|tostring|.[0:10]), total:(.total // 0)}' | while read -r p; do
+        day="$(echo "$p" | jq -r '.day')"
+        total="$(echo "$p" | jq -r '.total')"
+
+        # Daily row
+        printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+          "$(csv_escape "$sub_id")" \
+          "$(csv_escape "$rg")" \
+          "$(csv_escape "$loc")" \
+          "$(csv_escape "$ns_name")" \
+          "$(csv_escape "$eh_name")" \
+          "$(csv_escape "$metric")" \
+          "$(csv_escape "$day")" \
+          "$(csv_escape "$total")" \
+          "$(csv_escape "$ns_id")" \
+          >> "$DAILY_CSV"
+
+        # Accumulate summary stats in JSON
+        python3 - "$ACC_JSON" "$sub_id" "$rg" "$loc" "$ns_name" "$eh_name" "$metric" "$day" "$total" "$ns_id" <<'PY'
+import json, sys
+path, sub, rg, loc, ns, eh, metric, day, total, nsid = sys.argv[1:]
+total = float(total)
+
+key = (sub, rg, loc, ns, eh, metric, nsid)
+k = "|".join(key)
+
+with open(path) as f:
+    acc = json.load(f)
+
+acc.setdefault(k, {"sum":0.0, "max":0.0, "count":0, "last_nonzero_day": ""})
+a = acc[k]
+a["sum"] += total
+a["max"] = max(a["max"], total)
+a["count"] += 1
+if total > 0:
+    a["last_nonzero_day"] = day
+
+with open(path, "w") as f:
+    json.dump(acc, f)
+PY
+      done
+    done
+
+  done
+done
+
+info "Total Event Hubs discovered (from namespace listing): $TOTAL_EH"
+if [[ "$TOTAL_EH" -eq 0 ]]; then
+  warn "No hubs were listed. Check .eventhub_list_err.log"
+  exit 0
+fi
+
+# -----------------------------
+# 5) Write SUMMARY + INUSE from ACC_JSON
+# -----------------------------
+python3 - "$ACC_JSON" "$SUMMARY_CSV" "$INUSE_CSV" "$DAYS" <<'PY'
+import json, sys, csv
+acc_path, summary_csv, inuse_csv, days = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+
+with open(acc_path) as f:
+    acc = json.load(f)
+
+# Append to existing CSVs (headers already written by bash)
+summary_fields = None
+
+def write_row(path, row):
+    global summary_fields
+    if summary_fields is None:
+        summary_fields = list(row.keys())
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=summary_fields)
+        w.writerow(row)
+
+# Track per hub if any metric used
+hub_used = {}
+
+for k, st in acc.items():
+    sub, rg, loc, ns, eh, metric, nsid = k.split("|")
+    s = float(st.get("sum", 0.0))
+    c = int(st.get("count", 0)) or 0
+    maxv = float(st.get("max", 0.0))
+    avg = (s / c) if c else 0.0
+    last = st.get("last_nonzero_day","") or ""
+    is_in_use = s > 0.0
+
+    hub_key = (sub, rg, loc, ns, eh, nsid)
+    hub_used[hub_key] = hub_used.get(hub_key, False) or is_in_use
+
+    row = {
+        "subscriptionId": sub,
+        "resourceGroup": rg,
+        "location": loc,
+        "namespace": ns,
+        "eventHub": eh,
+        "metric": metric,
+        f"total_{days}d": s,
+        "avg_daily": avg,
+        "max_daily": maxv,
+        "last_nonzero_day": last,
+        "is_in_use": str(is_in_use).lower(),
+        "namespaceResourceId": nsid,
+    }
+    write_row(summary_csv, row)
+
+# Now write in-use-only by scanning summary again and filtering by hub_used
+with open(summary_csv, newline="", encoding="utf-8") as f_in:
+    r = csv.DictReader(f_in)
+    with open(inuse_csv, "a", newline="", encoding="utf-8") as f_out:
+        w = csv.DictWriter(f_out, fieldnames=r.fieldnames)
+        for row in r:
+            hub_key = (row["subscriptionId"], row["resourceGroup"], row["location"], row["namespace"], row["eventHub"], row["namespaceResourceId"])
+            if hub_used.get(hub_key, False):
+                w.writerow(row)
+PY
+
+info "Done. Created:"
+info " - $INV_CSV"
+info " - $DAILY_CSV"
+info " - $SUMMARY_CSV"
+info " - $INUSE_CSV"
+info "Logs (if something fails): .arg_namespaces_err.log, .eventhub_list_err.log, .metrics_err.log"
