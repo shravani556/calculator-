@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------
+# Config (override via env)
+# -----------------------------
+DAYS="${DAYS:-90}"             # e.g. DAYS=60 ./export_eventhubs_usage.sh
+INTERVAL="${INTERVAL:-P1D}"    # daily
+METRICS="${METRICS:-IncomingMessages,OutgoingMessages,IncomingBytes,OutgoingBytes}"
+
+# Output files (per run / per tenant)
+INV_CSV="${INV_CSV:-eventhubs_inventory.csv}"
+DAILY_CSV="${DAILY_CSV:-eventhubs_metrics_daily.csv}"
+SUMMARY_CSV="${SUMMARY_CSV:-eventhubs_usage_summary_${DAYS}d.csv}"
+INUSE_CSV="${INUSE_CSV:-eventhubs_in_use_only.csv}"
+
+# -----------------------------
+# Helpers
+# -----------------------------
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1"; exit 1; }; }
+info() { echo "[INFO] $*" >&2; }
+warn() { echo "[WARN] $*" >&2; }
+
+iso_utc_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+iso_utc_days_ago() {
+  local days="$1"
+  # macOS date supports -v
+  date -u -v-"${days}"d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 - <<PY
+from datetime import datetime, timezone, timedelta
+print((datetime.now(timezone.utc)-timedelta(days=int("${days}"))).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+csv_escape() {
+  local s="${1:-}"
+  s="${s//\"/\"\"}"
+  printf "\"%s\"" "$s"
+}
+
+# Optional: helper mode to print tenant login commands
+if [[ "${1:-}" == "--print-tenant-login" ]]; then
+  need az; need jq
+  az account list --all -o json | jq -r '.[]
+    | select(.state=="Enabled")
+    | .tenantId' | sort -u | while read -r tid; do
+      echo "az logout"
+      echo "az login --tenant \"${tid}\" --scope \"https://management.core.windows.net//.default\""
+      echo
+    done
+  exit 0
+fi
+
+# -----------------------------
+# Checks
+# -----------------------------
+need az
+need jq
+az extension add --name resource-graph -y >/dev/null 2>&1 || true
+az extension add --name eventhubs -y >/dev/null 2>&1 || true
+
+START_TIME="$(iso_utc_days_ago "$DAYS")"
+END_TIME="$(iso_utc_now)"
+info "Time window: $START_TIME  ->  $END_TIME (last ${DAYS} days)"
+info "Metrics: $METRICS, interval $INTERVAL"
+
+# -----------------------------
+# Get subscriptions and tenants
+# -----------------------------
+SUBS_JSON="$(az account list --all -o json)"
+TENANTS="$(echo "$SUBS_JSON" | jq -r '.[] | select(.state=="Enabled") | .tenantId' | sort -u)"
+
+if [[ -z "$TENANTS" ]]; then
+  echo "No enabled subscriptions found for this login."
+  exit 1
+fi
+
+# -----------------------------
+# Inventory Event Hubs via Resource Graph
+# -----------------------------
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,resourceId,partitionCount,messageRetentionInDays,status,captureEnabled" > "$INV_CSV"
+META_JSONL=".eventhubs_meta.jsonl"
+: > "$META_JSONL"
+
+read -r -d '' ARG_QUERY <<'KQL' || true
+resources
+| where type =~ 'microsoft.eventhub/namespaces/eventhubs'
+| project id, name, subscriptionId, resourceGroup, location, properties
+KQL
+
+TOTAL_EH=0
+TENANT_SUCCESS=0
+
+for TID in $TENANTS; do
+  SUB_IDS="$(echo "$SUBS_JSON" | jq -r --arg tid "$TID" '.[] | select(.state=="Enabled" and .tenantId==$tid) | .id')"
+  [[ -z "$SUB_IDS" ]] && continue
+
+  info "Querying Resource Graph for tenant $TID ..."
+  set +e
+  ARG_OUT="$(az graph query -q "$ARG_QUERY" --subscriptions $SUB_IDS -o json 2>".arg_err_${TID}.log")"
+  RC=$?
+  set -e
+
+  if [[ $RC -ne 0 ]]; then
+    warn "Resource Graph query failed for tenant $TID (MFA/tenant login likely required)."
+    warn "Try:"
+    warn "  az logout"
+    warn "  az login --tenant \"$TID\" --scope \"https://management.core.windows.net//.default\""
+    warn "Error log: .arg_err_${TID}.log"
+    continue
+  fi
+
+  TENANT_SUCCESS=1
+  COUNT_T="$(echo "$ARG_OUT" | jq '.data | length')"
+  TOTAL_EH=$((TOTAL_EH + COUNT_T))
+
+  echo "$ARG_OUT" | jq -c '.data[]' | while read -r row; do
+    rid="$(echo "$row" | jq -r '.id')"
+    sub="$(echo "$row" | jq -r '.subscriptionId')"
+    rg="$(echo "$row" | jq -r '.resourceGroup')"
+    loc="$(echo "$row" | jq -r '.location')"
+
+    ns="$(echo "$rid" | awk -F'/' '{for(i=1;i<=NF;i++) if($i=="namespaces"){print $(i+1); exit}}')"
+    eh="$(echo "$rid" | awk -F'/' '{for(i=1;i<=NF;i++) if($i=="eventhubs"){print $(i+1); exit}}')"
+    [[ -z "$eh" ]] && eh="$(echo "$row" | jq -r '.name')"
+
+    part="$(echo "$row" | jq -r '.properties.partitionCount // empty')"
+    reten="$(echo "$row" | jq -r '.properties.messageRetentionInDays // empty')"
+    status="$(echo "$row" | jq -r '.properties.status // empty')"
+    cap="$(echo "$row" | jq -r '.properties.captureDescription.enabled // empty')"
+
+    printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+      "$(csv_escape "$sub")" \
+      "$(csv_escape "$rg")" \
+      "$(csv_escape "$loc")" \
+      "$(csv_escape "$ns")" \
+      "$(csv_escape "$eh")" \
+      "$(csv_escape "$rid")" \
+      "$(csv_escape "$part")" \
+      "$(csv_escape "$reten")" \
+      "$(csv_escape "$status")" \
+      "$(csv_escape "$cap")" \
+      >> "$INV_CSV"
+
+    echo "$row" | jq -c --arg ns "$ns" --arg eh "$eh" '
+      {resourceId:.id, subscriptionId:.subscriptionId, resourceGroup:.resourceGroup, location:.location,
+       namespace:$ns, eventHub:$eh}
+    ' >> "$META_JSONL"
+  done
+done
+
+info "Discovered $TOTAL_EH Event Hubs."
+if [[ $TOTAL_EH -eq 0 ]]; then
+  warn "No Event Hubs returned."
+  warn "This is almost certainly because you need to MFA-login per tenant."
+  warn "Run: ./export_eventhubs_usage.sh --print-tenant-login"
+  exit 2
+fi
+
+# -----------------------------
+# Metrics collection
+# -----------------------------
+echo "resourceId,metric,day,total" > "$DAILY_CSV"
+ACC_JSON=".acc.json"
+echo '{}' > "$ACC_JSON"
+
+# Iterate resource IDs without mapfile (bash 3.2 compatible)
+info "Fetching metrics for discovered Event Hubs..."
+
+jq -r '.resourceId' "$META_JSONL" | sort -u | while read -r rid; do
+  [[ -z "$rid" ]] && continue
+
+  set +e
+  MET_JSON="$(az monitor metrics list \
+    --resource "$rid" \
+    --metrics "$METRICS" \
+    --aggregation Total \
+    --interval "$INTERVAL" \
+    --start-time "$START_TIME" \
+    --end-time "$END_TIME" \
+    -o json 2>>".metrics_err.log")"
+  RC=$?
+  set -e
+
+  if [[ $RC -ne 0 ]]; then
+    warn "Metrics failed for: $rid (see .metrics_err.log). Often missing Monitoring Reader."
+    continue
+  fi
+
+  # Flatten points to daily CSV + accumulate
+  echo "$MET_JSON" | jq -c '.value[] | {metric:(.name.value), data:(.timeseries[0].data // [])}' | while read -r m; do
+    metric="$(echo "$m" | jq -r '.metric')"
+    echo "$m" | jq -c '.data[] | {day:(.timeStamp|tostring|.[0:10]), total:(.total // 0)}' | while read -r p; do
+      day="$(echo "$p" | jq -r '.day')"
+      total="$(echo "$p" | jq -r '.total')"
+
+      printf "%s,%s,%s,%s\n" \
+        "$(csv_escape "$rid")" \
+        "$(csv_escape "$metric")" \
+        "$(csv_escape "$day")" \
+        "$(csv_escape "$total")" \
+        >> "$DAILY_CSV"
+
+      python3 - "$ACC_JSON" "$rid" "$metric" "$day" "$total" <<'PY'
+import json, sys
+path, rid, metric, day, total = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5])
+with open(path) as f:
+    acc = json.load(f)
+acc.setdefault(rid, {})
+acc[rid].setdefault(metric, {"sum":0.0, "max":0.0, "count":0, "last_nonzero_day": None})
+m = acc[rid][metric]
+m["sum"] += total
+m["max"] = max(m["max"], total)
+m["count"] += 1
+if total > 0:
+    m["last_nonzero_day"] = day
+with open(path, "w") as f:
+    json.dump(acc, f)
+PY
+    done
+  done
+done
+
+# -----------------------------
+# Summary + In-use CSVs
+# -----------------------------
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,metric,total_${DAYS}d,avg_daily,max_daily,last_nonzero_day,is_in_use,resourceId" > "$SUMMARY_CSV"
+INUSE_JSON=".inuse.json"
+echo '{}' > "$INUSE_JSON"
+
+python3 - "$ACC_JSON" "$META_JSONL" "$SUMMARY_CSV" "$INUSE_JSON" "$DAYS" <<'PY'
+import json, sys, csv
+acc_path, meta_path, out_csv, inuse_path, days = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+with open(acc_path) as f:
+    acc = json.load(f)
+meta = {}
+with open(meta_path) as f:
+    for line in f:
+        o = json.loads(line)
+        meta[o["resourceId"]] = o
+inuse = {}
+rows = []
+for rid, metrics in acc.items():
+    m = meta.get(rid, {})
+    for metric, stats in metrics.items():
+        s = float(stats.get("sum", 0.0))
+        c = int(stats.get("count", 0)) or 0
+        maxv = float(stats.get("max", 0.0))
+        avg = (s / c) if c else 0.0
+        last_nz = stats.get("last_nonzero_day") or ""
+        is_in_use = s > 0.0
+        if is_in_use:
+            inuse[rid] = True
+        rows.append({
+            "subscriptionId": m.get("subscriptionId",""),
+            "resourceGroup": m.get("resourceGroup",""),
+            "location": m.get("location",""),
+            "namespace": m.get("namespace",""),
+            "eventHub": m.get("eventHub",""),
+            "metric": metric,
+            f"total_{days}d": s,
+            "avg_daily": avg,
+            "max_daily": maxv,
+            "last_nonzero_day": last_nz,
+            "is_in_use": str(is_in_use).lower(),
+            "resourceId": rid
+        })
+fieldnames = ["subscriptionId","resourceGroup","location","namespace","eventHub",
+              "metric",f"total_{days}d","avg_daily","max_daily","last_nonzero_day",
+              "is_in_use","resourceId"]
+with open(out_csv, "a", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=fieldnames)
+    for r in rows:
+        w.writerow(r)
+with open(inuse_path, "w") as f:
+    json.dump(inuse, f)
+PY
+
+echo "subscriptionId,resourceGroup,location,namespace,eventHub,metric,total_${DAYS}d,avg_daily,max_daily,last_nonzero_day,is_in_use,resourceId" > "$INUSE_CSV"
+python3 - "$SUMMARY_CSV" "$INUSE_JSON" "$INUSE_CSV" <<'PY'
+import csv, json, sys
+summary_csv, inuse_json, out_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(inuse_json) as f:
+    inuse = json.load(f)
+with open(summary_csv, newline="", encoding="utf-8") as f_in, open(out_csv, "a", newline="", encoding="utf-8") as f_out:
+    r = csv.DictReader(f_in)
+    w = csv.DictWriter(f_out, fieldnames=r.fieldnames)
+    for row in r:
+        rid = row.get("resourceId")
+        if rid and rid in inuse:
+            w.writerow(row)
+PY
+
+info "Done. Created:"
+info " - $INV_CSV"
+info " - $DAILY_CSV"
+info " - $SUMMARY_CSV"
+info " - $INUSE_CSV"
+info "If Resource Graph failed, login per tenant and rerun:"
+info "  ./export_eventhubs_usage.sh --print-tenant-login"
