@@ -1,0 +1,123 @@
+#!/bin/bash
+set -euo pipefail
+
+DAYS_TO_CHECK=90
+PRICE_PER_GB=2.76   # USD (Pay-As-You-Go, approx)
+OUTPUT_FILE="LAW_Final_Report_$(date +%Y%m%d_%H%M%S).csv"
+DELETE_FILE="LAW_Delete_Ready_$(date +%Y%m%d_%H%M%S).csv"
+TEMP_DIR="/tmp/law_ultimate_$$"
+mkdir -p "$TEMP_DIR"
+
+echo "SubscriptionName,SubscriptionId,WorkspaceName,WorkspaceType,ResourceGroup,Location,RetentionDays,HasAnyData,TablesWithRecentData,LastLogDate,DaysSinceLastLog,InsightsConfigured,AvgDailyGB,EstMonthlyCostUSD,UsageStatus,Recommendation" > "$OUTPUT_FILE"
+
+echo "SubscriptionName,SubscriptionId,WorkspaceName,ResourceGroup,Location,Reason" > "$DELETE_FILE"
+
+az account list --query "[?state=='Enabled'].[name,id]" -o tsv > "$TEMP_DIR/subs.txt"
+
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  az account set --subscription "$SUB_ID" >/dev/null
+
+  az monitor log-analytics workspace list -o json > "$TEMP_DIR/ws.json" || echo "[]" > "$TEMP_DIR/ws.json"
+
+  jq -c '.[]' "$TEMP_DIR/ws.json" | while read -r ws; do
+
+    WS_NAME=$(jq -r '.name' <<< "$ws")
+    WS_ID=$(jq -r '.id' <<< "$ws")
+    WS_RG=$(jq -r '.resourceGroup' <<< "$ws")
+    WS_LOC=$(jq -r '.location' <<< "$ws")
+    RETENTION=$(jq -r '.retentionInDays // 30' <<< "$ws")
+
+    WS_TYPE="Legacy"
+    if jq -e '.properties.features.enableLogAccessUsingOnlyResourcePermissions == true' <<< "$ws" >/dev/null; then
+      WS_TYPE="vNext"
+    fi
+
+    HAS_DATA="Unknown"
+    LAST_LOG="N/A"
+    DAYS_SINCE="N/A"
+    TABLES_RECENT=0
+    INSIGHTS="No"
+    AVG_GB=0
+    COST=0
+    STATUS="UNKNOWN"
+    RECOMMENDATION="Manual review"
+
+    # ---- Permission check ----
+    PERM_TEST=$(az monitor log-analytics query \
+      -w "$WS_ID" \
+      --analytics-query "Heartbeat | take 1" \
+      -o json 2>&1 || true)
+
+    if echo "$PERM_TEST" | grep -qi "authorization"; then
+      STATUS="NO_ACCESS"
+      RECOMMENDATION="Assign Log Analytics Reader / Monitoring Reader"
+
+    else
+      BASIC=$(az monitor log-analytics query \
+        -w "$WS_ID" \
+        --analytics-query "search * | take 1" \
+        -o json 2>/dev/null)
+
+      if [ "$(jq length <<< "$BASIC")" -eq 0 ]; then
+        HAS_DATA="No"
+
+        DIAG_COUNT=$(az monitor diagnostic-settings subscription list \
+          --query "value[?workspaceId=='$WS_ID'] | length(@)" \
+          -o tsv 2>/dev/null || echo "0")
+
+        if [ "$DIAG_COUNT" -gt 0 ]; then
+          INSIGHTS="Yes"
+          STATUS="CONFIGURED_NOT_USED"
+          RECOMMENDATION="Diagnostics configured but no ingestion"
+        else
+          STATUS="NO_DATA"
+          RECOMMENDATION="Safe to delete – never ingested logs"
+          echo "$SUB_NAME,$SUB_ID,$WS_NAME,$WS_RG,$WS_LOC,Never ingested logs" >> "$DELETE_FILE"
+        fi
+
+      else
+        HAS_DATA="Yes"
+
+        STATS=$(az monitor log-analytics query \
+          -w "$WS_ID" \
+          --analytics-query "
+          search *
+          | where TimeGenerated > ago(365d)
+          | summarize
+              LastLog=max(TimeGenerated),
+              Tables=dcount(\$table),
+              AvgGB=avg(_BilledSize/1024/1024/1024)
+          " \
+          -o json)
+
+        LAST_LOG=$(jq -r '.[0].LastLog' <<< "$STATS")
+        TABLES_RECENT=$(jq -r '.[0].Tables' <<< "$STATS")
+        AVG_GB=$(jq -r '.[0].AvgGB // 0' <<< "$STATS")
+
+        COST=$(awk "BEGIN {printf \"%.2f\", $AVG_GB * 30 * $PRICE_PER_GB}")
+
+        LAST_EPOCH=$(date -d "$LAST_LOG" +%s)
+        NOW=$(date +%s)
+        DAYS_SINCE=$(( (NOW - LAST_EPOCH) / 86400 ))
+
+        if [ "$DAYS_SINCE" -le "$DAYS_TO_CHECK" ]; then
+          STATUS="ACTIVE"
+          RECOMMENDATION="Keep – actively ingesting logs"
+        else
+          STATUS="INACTIVE"
+          RECOMMENDATION="Review – no logs in last $DAYS_TO_CHECK days"
+        fi
+      fi
+    fi
+
+    echo "$SUB_NAME,$SUB_ID,$WS_NAME,$WS_TYPE,$WS_RG,$WS_LOC,$RETENTION,$HAS_DATA,$TABLES_RECENT,$LAST_LOG,$DAYS_SINCE,$INSIGHTS,$AVG_GB,$COST,$STATUS,$RECOMMENDATION" >> "$OUTPUT_FILE"
+
+  done
+done < "$TEMP_DIR/subs.txt"
+
+rm -rf "$TEMP_DIR"
+
+echo ""
+echo "✅ LAW ANALYSIS COMPLETE"
+echo "📄 Full Report:   $OUTPUT_FILE"
+echo "🗑 Delete-Ready: $DELETE_FILE"
