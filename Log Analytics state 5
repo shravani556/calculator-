@@ -1,0 +1,209 @@
+#!/bin/bash
+
+# Script to evaluate Log Analytics Workspaces with detailed log information
+# Shows last activity time for each log type/table in the workspace
+
+set -e
+
+# Configuration
+DAYS_TO_CHECK=90
+OUTPUT_FILE="log_analytics_detailed_audit_$(date +%Y%m%d_%H%M%S).csv"
+SUMMARY_FILE="log_analytics_summary_$(date +%Y%m%d_%H%M%S).csv"
+TEMP_FILE="/tmp/law_audit_$$.json"
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo "========================================"
+echo "Log Analytics Workspace Detailed Audit"
+echo "========================================"
+echo "Checking for workspaces and their log details"
+echo ""
+
+# Check if Azure CLI is installed
+if ! command -v az &> /dev/null; then
+    echo -e "${RED}Error: Azure CLI is not installed${NC}"
+    exit 1
+fi
+
+# Check if logged in
+if ! az account show &> /dev/null; then
+    echo -e "${RED}Error: Not logged into Azure. Please run 'az login'${NC}"
+    exit 1
+fi
+
+# Get current subscription
+SUBSCRIPTION=$(az account show --query name -o tsv)
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+echo "Current subscription: $SUBSCRIPTION"
+echo "Subscription ID: $SUBSCRIPTION_ID"
+echo ""
+
+# Create CSV headers
+echo "WorkspaceName,ResourceGroup,Location,Type,ProvisioningState,SKU,RetentionDays,TableName,LastLogTime,DaysSinceLastLog,RowCount,Status" > "$OUTPUT_FILE"
+echo "WorkspaceName,ResourceGroup,Location,Type,ProvisioningState,RetentionDays,TotalTables,ActiveTables,InactiveTables,OldestLog,NewestLog,OverallStatus" > "$SUMMARY_FILE"
+
+# Get all Log Analytics Workspaces
+echo "Fetching all Log Analytics Workspaces..."
+az monitor log-analytics workspace list -o json > "$TEMP_FILE"
+
+TOTAL_WORKSPACES=$(jq '. | length' "$TEMP_FILE")
+echo "Found $TOTAL_WORKSPACES workspaces"
+echo ""
+
+INACTIVE_WS_COUNT=0
+ACTIVE_WS_COUNT=0
+COUNTER=0
+
+# Process each workspace
+jq -c '.[]' "$TEMP_FILE" | while read -r workspace; do
+    COUNTER=$((COUNTER + 1))
+    
+    WS_NAME=$(echo "$workspace" | jq -r '.name')
+    WS_RG=$(echo "$workspace" | jq -r '.resourceGroup')
+    WS_LOCATION=$(echo "$workspace" | jq -r '.location')
+    WS_STATE=$(echo "$workspace" | jq -r '.provisioningState')
+    WS_RETENTION=$(echo "$workspace" | jq -r '.retentionInDays // "N/A"')
+    WS_ID=$(echo "$workspace" | jq -r '.id')
+    WS_SKU=$(echo "$workspace" | jq -r '.sku.name // "N/A"')
+    
+    # Determine workspace type (Legacy vs vNext)
+    WS_TYPE="Legacy"
+    if echo "$workspace" | jq -e '.properties.features.enableLogAccessUsingOnlyResourcePermissions == true' &> /dev/null; then
+        WS_TYPE="vNext"
+    fi
+    
+    echo "========================================"
+    echo -e "${BLUE}[$COUNTER/$TOTAL_WORKSPACES] Workspace: $WS_NAME${NC}"
+    echo "========================================"
+    echo "Type: $WS_TYPE | Resource Group: $WS_RG"
+    echo "Location: $WS_LOCATION | State: $WS_STATE"
+    echo "SKU: $WS_SKU | Retention: $WS_RETENTION days"
+    echo ""
+    
+    # Query to get all tables and their last activity
+    TABLES_QUERY="search *
+    | where TimeGenerated > ago(365d)
+    | summarize 
+        LastLog = max(TimeGenerated),
+        RowCount = count()
+        by \$table
+    | project TableName = \$table, LastLog, RowCount
+    | order by LastLog desc"
+    
+    echo "Querying tables and log activity..."
+    
+    # Execute query with error handling
+    TABLES_RESULT=$(az monitor log-analytics query \
+        -w "$WS_ID" \
+        --analytics-query "$TABLES_QUERY" \
+        -o json 2>/dev/null || echo "[]")
+    
+    TABLE_COUNT=$(echo "$TABLES_RESULT" | jq '. | length')
+    
+    if [ "$TABLE_COUNT" -eq 0 ]; then
+        echo -e "${RED}✗ NO DATA: No tables or logs found in this workspace${NC}"
+        echo "$WS_NAME,$WS_RG,$WS_LOCATION,$WS_TYPE,$WS_STATE,$WS_RETENTION,NO_DATA,Never,N/A,0,NO_DATA" >> "$OUTPUT_FILE"
+        echo "$WS_NAME,$WS_RG,$WS_LOCATION,$WS_TYPE,$WS_STATE,$WS_RETENTION,0,0,0,Never,Never,NO_DATA" >> "$SUMMARY_FILE"
+        echo ""
+        continue
+    fi
+    
+    echo "Found $TABLE_COUNT tables with data"
+    echo ""
+    
+    ACTIVE_TABLES=0
+    INACTIVE_TABLES=0
+    OLDEST_LOG=""
+    NEWEST_LOG=""
+    
+    # Process each table
+    echo "$TABLES_RESULT" | jq -c '.[]' | while read -r table; do
+        TABLE_NAME=$(echo "$table" | jq -r '.TableName')
+        LAST_LOG=$(echo "$table" | jq -r '.LastLog')
+        ROW_COUNT=$(echo "$table" | jq -r '.RowCount')
+        
+        # Calculate days since last log
+        if [ "$LAST_LOG" != "null" ] && [ "$LAST_LOG" != "" ]; then
+            LAST_LOG_EPOCH=$(date -d "$LAST_LOG" +%s 2>/dev/null || echo "0")
+            CURRENT_EPOCH=$(date +%s)
+            DAYS_SINCE=$((( CURRENT_EPOCH - LAST_LOG_EPOCH ) / 86400))
+            
+            if [ $DAYS_SINCE -gt $DAYS_TO_CHECK ]; then
+                STATUS="INACTIVE"
+                INACTIVE_TABLES=$((INACTIVE_TABLES + 1))
+                echo -e "  ${RED}✗ $TABLE_NAME${NC}"
+                echo -e "    Last log: $LAST_LOG (${RED}$DAYS_SINCE days ago${NC})"
+                echo -e "    Row count: $ROW_COUNT"
+            else
+                STATUS="ACTIVE"
+                ACTIVE_TABLES=$((ACTIVE_TABLES + 1))
+                echo -e "  ${GREEN}✓ $TABLE_NAME${NC}"
+                echo -e "    Last log: $LAST_LOG (${GREEN}$DAYS_SINCE days ago${NC})"
+                echo -e "    Row count: $ROW_COUNT"
+            fi
+            
+            # Track oldest and newest logs
+            if [ -z "$OLDEST_LOG" ]; then
+                OLDEST_LOG="$LAST_LOG"
+            fi
+            NEWEST_LOG="$LAST_LOG"
+            
+        else
+            DAYS_SINCE="Unknown"
+            STATUS="NO_DATA"
+            INACTIVE_TABLES=$((INACTIVE_TABLES + 1))
+            echo -e "  ${RED}✗ $TABLE_NAME - NO DATA${NC}"
+        fi
+        
+        # Write detailed info to CSV
+        echo "$WS_NAME,$WS_RG,$WS_LOCATION,$WS_TYPE,$WS_STATE,$WS_SKU,$WS_RETENTION,$TABLE_NAME,$LAST_LOG,$DAYS_SINCE,$ROW_COUNT,$STATUS" >> "$OUTPUT_FILE"
+    done
+    
+    # Determine overall workspace status
+    if [ $ACTIVE_TABLES -eq 0 ]; then
+        OVERALL_STATUS="INACTIVE"
+        INACTIVE_WS_COUNT=$((INACTIVE_WS_COUNT + 1))
+        echo -e "${RED}Overall Status: INACTIVE (No active tables)${NC}"
+    else
+        OVERALL_STATUS="ACTIVE"
+        ACTIVE_WS_COUNT=$((ACTIVE_WS_COUNT + 1))
+        echo -e "${GREEN}Overall Status: ACTIVE ($ACTIVE_TABLES active tables)${NC}"
+    fi
+    
+    # Write summary
+    echo "$WS_NAME,$WS_RG,$WS_LOCATION,$WS_TYPE,$WS_STATE,$WS_RETENTION,$TABLE_COUNT,$ACTIVE_TABLES,$INACTIVE_TABLES,$OLDEST_LOG,$NEWEST_LOG,$OVERALL_STATUS" >> "$SUMMARY_FILE"
+    
+    echo ""
+done
+
+# Cleanup
+rm -f "$TEMP_FILE"
+
+# Final Summary
+echo "========================================"
+echo "Audit Complete!"
+echo "========================================"
+echo "Total Workspaces Analyzed: $TOTAL_WORKSPACES"
+echo -e "${GREEN}Active Workspaces: $ACTIVE_WS_COUNT${NC}"
+echo -e "${RED}Inactive Workspaces: $INACTIVE_WS_COUNT${NC}"
+echo ""
+echo "Results saved to:"
+echo "  Detailed Report: $OUTPUT_FILE"
+echo "  Summary Report: $SUMMARY_FILE"
+echo ""
+
+# Display inactive workspaces summary
+echo "Inactive Workspaces Summary:"
+echo "----------------------------"
+awk -F',' 'NR>1 && $12 == "INACTIVE" {print "  - " $1 " (" $4 ") - " $7 " tables, all inactive"}' "$SUMMARY_FILE"
+echo ""
+
+# Display workspaces with some inactive tables
+echo "Workspaces with Inactive Tables:"
+echo "--------------------------------"
+awk -F',' 'NR>1 && $12 == "ACTIVE" && $9 > 0 {print "  - " $1 " - Active: " $8 ", Inactive: " $9}' "$SUMMARY_FILE"
