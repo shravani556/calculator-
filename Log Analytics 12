@@ -1,0 +1,70 @@
+#!/bin/bash
+set -u   # NO -e (important)
+
+DAYS_TO_CHECK=90
+OUTPUT_FILE="LAW_Final_Report.csv"
+DELETE_FILE="LAW_Delete_Ready.csv"
+
+echo "SubscriptionName,SubscriptionId,WorkspaceName,WorkspaceType,ResourceGroup,Location,UsageStatus,Recommendation" > "$OUTPUT_FILE"
+echo "SubscriptionName,SubscriptionId,WorkspaceName,ResourceGroup,Location,Reason" > "$DELETE_FILE"
+
+echo "🔍 Fetching subscriptions..."
+
+SUBS=$(az account list --query "[?state=='Enabled'].[name,id]" -o tsv)
+
+if [ -z "$SUBS" ]; then
+  echo "❌ No enabled subscriptions found"
+  exit 1
+fi
+
+while IFS=$'\t' read -r SUB_NAME SUB_ID; do
+  echo "➡ Subscription: $SUB_NAME"
+  az account set --subscription "$SUB_ID" >/dev/null 2>&1
+
+  WS_JSON=$(az monitor log-analytics workspace list -o json 2>/dev/null)
+
+  if [ -z "$WS_JSON" ] || [ "$WS_JSON" = "[]" ]; then
+    echo "   No workspaces found"
+    continue
+  fi
+
+  echo "$WS_JSON" | jq -c '.[]' | while read -r ws; do
+    WS_NAME=$(jq -r '.name' <<< "$ws")
+    WS_ID=$(jq -r '.id' <<< "$ws")
+    WS_RG=$(jq -r '.resourceGroup' <<< "$ws")
+    WS_LOC=$(jq -r '.location' <<< "$ws")
+
+    WS_TYPE="Legacy"
+    jq -e '.properties.features.enableLogAccessUsingOnlyResourcePermissions==true' <<< "$ws" >/dev/null && WS_TYPE="vNext"
+
+    STATUS="UNKNOWN"
+    RECOMMENDATION="Manual review"
+
+    QUERY_OUT=$(az monitor log-analytics query \
+      -w "$WS_ID" \
+      --analytics-query "search * | take 1" \
+      -o json 2>&1)
+
+    if echo "$QUERY_OUT" | grep -qi "authorization"; then
+      STATUS="NO_ACCESS"
+      RECOMMENDATION="Fix RBAC"
+    elif echo "$QUERY_OUT" | grep -q '\['; then
+      if [ "$(jq length <<< "$QUERY_OUT")" -eq 0 ]; then
+        STATUS="NO_DATA"
+        RECOMMENDATION="Safe to delete"
+        echo "$SUB_NAME,$SUB_ID,$WS_NAME,$WS_RG,$WS_LOC,Never ingested" >> "$DELETE_FILE"
+      else
+        STATUS="ACTIVE_OR_INACTIVE"
+        RECOMMENDATION="Has logs – review last activity"
+      fi
+    fi
+
+    echo "$SUB_NAME,$SUB_ID,$WS_NAME,$WS_TYPE,$WS_RG,$WS_LOC,$STATUS,$RECOMMENDATION" >> "$OUTPUT_FILE"
+  done
+
+done <<< "$SUBS"
+
+echo ""
+echo "✅ Done"
+echo "📄 $OUTPUT_FILE"
+echo "🗑 $DELETE_FILE"
