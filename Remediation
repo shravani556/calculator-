@@ -1,0 +1,232 @@
+From your screenshot, the CRITICAL findings are:
+
+Authentication should be enabled on API endpoints hosted in Function Apps
+
+API endpoints in Azure API Management should be authenticated
+
+SQL databases should have vulnerability findings resolved
+
+Below are practical, Azure-Portal steps to remediate each (with a “recommended” approach + a simpler fallback where relevant).
+
+1) Enable authentication on API endpoints hosted in Azure Function Apps
+Recommended (enterprise) approach: Entra ID (Azure AD) auth + block anonymous access
+
+This protects the Function App at the platform layer (before your code runs).
+
+Steps (Azure Portal):
+
+Go to Azure Portal → Function App → Authentication
+
+Click Add identity provider
+
+Choose Microsoft (Entra ID / Azure AD)
+
+Select/create an App registration
+
+If you don’t have one: create a new registration from the wizard
+
+Under App Service authentication settings:
+
+Set Require authentication = On
+
+Set Unauthenticated requests = HTTP 401 (Unauthorized) (or “Redirect” only if browser-based)
+
+Save
+
+Important checks:
+
+In the Function App Authentication → Microsoft provider, ensure:
+
+Issuer URL is correct (your tenant)
+
+Allowed token audiences includes your API’s audience (Application ID URI / Client ID)
+
+If your Function is called via APIM, then APIM must send a valid token (see APIM section below).
+
+Strong additional hardening (highly recommended)
+
+Even with auth enabled, you should reduce exposure:
+
+A) Restrict network access
+
+Function App → Networking
+
+Use Access Restrictions to allow only APIM outbound IPs (basic)
+
+Or use Private Endpoint + VNet integration (best)
+
+B) Ensure per-function auth level isn’t Anonymous
+If you have HTTP-triggered functions set to Anonymous, update them.
+
+In code (C# example): change to AuthorizationLevel.Function (or Admin)
+
+Or in function.json set:
+
+"authLevel": "function" (instead of "anonymous")
+
+This is a good baseline even if you also use Entra ID.
+
+Simpler fallback: Function keys (shared secret)
+
+This is “authentication”, but weaker than Entra ID (keys can be copied/rotated; no user identity).
+
+Steps:
+
+Function App → Functions → select function → Function Keys
+
+Create/rotate key
+
+Ensure HTTP trigger auth level = Function
+
+Callers must pass:
+
+x-functions-key: <key> header OR ?code=<key> query
+
+If your security team is strict, they usually prefer Entra ID / JWT over function keys.
+
+2) Ensure Azure API Management (APIM) endpoints are authenticated
+
+You want APIM to reject unauthenticated callers, not just pass requests through.
+
+Recommended approach: JWT validation (OAuth2 / Entra ID)
+
+High level flow: Client → APIM (JWT) → APIM validates JWT → forwards to backend
+
+Steps (Azure Portal):
+
+Go to API Management → APIs → select your API
+
+Go to Design → Inbound processing → Policies
+
+Add a validate-jwt policy in the inbound section
+
+Use your tenant’s OpenID configuration and expected audience/issuer
+
+Save
+
+What to enforce in validate-jwt:
+
+Valid issuer
+
+Valid audience
+
+Required scopes/roles (if applicable)
+
+Token not expired
+
+Also do this:
+
+APIM → APIs → Settings
+
+Ensure you are using HTTPS only
+
+If this API should not be public:
+
+Put APIM in Internal VNet mode (best) or restrict via IP filtering / WAF (Front Door/AppGW)
+
+Quick baseline approach: Require Subscription Key
+
+This is not as strong as OAuth/JWT, but is better than nothing and quick to implement.
+
+Steps:
+
+APIM → Products → Create/choose a Product
+
+Set Requires subscription = Yes
+
+Add your API to the product
+
+Ensure the API/operations require subscription (default in most setups)
+
+Consumers must pass Ocp-Apim-Subscription-Key
+
+Note: Subscription key is an API key. For stronger security, combine with JWT.
+
+Backend authentication from APIM to Function App (don’t skip this)
+
+Even if APIM is authenticated, your backend should not accept traffic from “anywhere”.
+
+Best pattern:
+
+Function App is private (Private Endpoint / access restrictions)
+
+Only APIM can reach it
+
+APIM authenticates to backend using Managed Identity or function keys (depending on your design)
+
+3) Resolve SQL database vulnerability findings (Defender for Cloud / VA)
+
+This recommendation usually comes from Microsoft Defender for Cloud / SQL Vulnerability Assessment.
+
+Step-by-step process to clear the recommendation
+
+Go to Microsoft Defender for Cloud → Recommendations
+
+Search for: “SQL databases should have vulnerability findings resolved”
+
+Click the recommendation → you’ll see impacted SQL servers/databases
+
+Select a database/resource → open the findings list
+
+Run/refresh the Vulnerability Assessment scan (if needed)
+
+For each finding:
+
+Open it
+
+Follow the remediation guidance (often includes exact T-SQL or configuration changes)
+
+Re-run scan to confirm it clears
+
+Common fixes that typically clear SQL findings
+
+These are the ones that show up frequently:
+
+A) Reduce network exposure
+
+SQL Server → Networking
+
+Disable Public network access (if possible)
+
+Use Private Endpoint
+
+Tighten Firewall rules (remove 0.0.0.0/0; avoid broad ranges)
+
+B) Enforce secure transport
+
+Require TLS 1.2+ (where applicable)
+
+Ensure clients use encrypted connections
+
+C) Turn on auditing / threat detection
+
+SQL Server/DB → Auditing
+
+Defender for SQL settings enabled (Defender for Cloud)
+
+D) Fix identity/permission issues
+
+Remove excessive privileges
+
+Avoid using high-privileged accounts for apps
+
+Rotate credentials / eliminate stale logins
+
+E) Encryption
+
+Ensure TDE (Transparent Data Encryption) is enabled (Azure SQL usually defaults to on, but verify)
+
+Consider Always Encrypted for sensitive columns (if required)
+
+What I need from you to tailor this exactly (optional, but helps)
+
+If you tell me these 3 things, I can give you the exact recommended combo (and the exact APIM policy template):
+
+Are your Function endpoints meant to be public or internal-only?
+
+Do you use Entra ID already for app auth (tokens), or only keys?
+
+Is it Azure SQL Database / Managed Instance / SQL on VM?
+
+If you don’t want to share details, the safest default is:
+APIM (validate-jwt) + Function App (require auth + private access) + SQL (resolve VA findings + private endpoint).
