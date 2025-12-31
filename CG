@@ -1,3 +1,20 @@
+Hi Baiji,
+
+Hope you are doing well.
+
+As part of the A00011 legacy cleanup activity, we are verifying whether any of the existing resources are still in use.
+
+Could you please confirm:
+
+1. If any A00011 legacy resources are currently being used by the application, and
+2. If not, please share the list of resources (or environments) that we can safely proceed with deletion (at least test resources, as per the task).
+
+Once we receive your confirmation and the approved list, we will proceed accordingly.
+
+Thank you for your support.
+
+Best regards,
+Sravani B
 git submodule deinit -f workload/modules/synapse && git rm -f workload/modules/synapse && rm -rf .git/modules/workload/modules/synapse
 git submodule deinit -f workload/modules/synapse; git rm -f workload/modules/synapse; Remove-Item -Recurse -Force .git/modules/workload/modules/synapse
 Here is a crisp and professional follow-up email you can send to Bryan:
