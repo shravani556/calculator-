@@ -1,4 +1,39 @@
-From your screenshot, the CRITICAL findings are:
+1) Azure Function Apps – Enable authentication on API endpoints
+* Authentication & authorization in App Service / Azure Functions (Easy Auth overview) https://learn.microsoft.com/en-us/azure/app-service/overview-authentication-authorization?utm_source=chatgpt.com
+* Configure Microsoft Entra ID (Azure AD) authentication for App Service / Azure Functions https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-provider-aad?utm_source=chatgpt.com
+* Securing Azure Functions (security concepts + auth options)  https://learn.microsoft.com/en-us/azure/azure-functions/security-concepts?utm_source=chatgpt.com
+
+2) Azure API Management – Ensure endpoints are authenticated
+Azure API Management – Ensure endpoints are authenticated
+* Authentication & authorization to APIs in Azure API Management (overview + patterns) https://learn.microsoft.com/en-us/azure/api-management/authentication-authorization-overview?utm_source=chatgpt.com
+* validate-jwt policy reference (to enforce JWT/OAuth tokens at APIM gateway) https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy?utm_source=chatgpt.com
+* Protect backend in APIM using OAuth 2.0 + Microsoft Entra ID (end-to-end example) https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-protect-backend-with-aad?utm_source=chatgpt.com
+* APIM Subscriptions (subscription keys / requirement behavior) https://learn.microsoft.com/en-us/azure/api-management/api-management-subscriptions?utm_source=chatgpt.com
+* How to create subscriptions in APIM (step-by-step) https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-create-subscriptions?utm_source=chatgpt.com
+* Create & publish a Product in APIM (so you can require subscription keys via products) https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-add-products?utm_source=chatgpt.com
+
+3) Azure SQL – Resolve “vulnerability findings”
+* SQL Vulnerability Assessment (VA) overview (Defender for Cloud) https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-overview?utm_source=chatgpt.com
+* Find & remediate vulnerabilities in Azure SQL databases (VA scans + remediation workflow)https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-find?utm_source=chatgpt.com
+* Express configuration vulnerability findings (Defender for Cloud)https://learn.microsoft.com/en-us/azure/defender-for-cloud/configure-vulnerability-findings-express?utm_source=chatgpt.com
+* SQL VA rules reference (what checks exist + what they mean) https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-rules?utm_source=chatgpt.com
+
+Copy-paste links (official Microsoft Learn)
+https://learn.microsoft.com/en-us/azure/app-service/overview-authentication-authorization
+https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-provider-aad
+https://learn.microsoft.com/en-us/azure/azure-functions/security-concepts
+
+https://learn.microsoft.com/en-us/azure/api-management/authentication-authorization-overview
+https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy
+https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-protect-backend-with-aad
+https://learn.microsoft.com/en-us/azure/api-management/api-management-subscriptions
+https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-create-subscriptions
+https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-add-products
+
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-overview
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-find
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/configure-vulnerability-findings-express
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-rulesFrom your screenshot, the CRITICAL findings are:
 
 Authentication should be enabled on API endpoints hosted in Function Apps
 
