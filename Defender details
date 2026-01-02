@@ -1,0 +1,178 @@
+cat > export_defender_recommendations.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------
+# Settings you can change
+# -----------------------------
+# Set to "ALL" to export everything, or keep "Unhealthy" to export only actionable items.
+STATUS_FILTER="${STATUS_FILTER:-Unhealthy}"   # Unhealthy | Healthy | NotApplicable | ALL
+
+# Page size for Resource Graph (max 1000)
+PAGE_SIZE=1000
+
+# Output folder
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_DIR="defender_recommendations_export_${TS}"
+mkdir -p "$OUT_DIR"
+
+OUT_CSV="${OUT_DIR}/defender_recommendations.csv"
+OUT_JSONL="${OUT_DIR}/defender_recommendations.jsonl"
+
+# -----------------------------
+# Prereqs: Resource Graph extension + jq
+# -----------------------------
+az extension add --name resource-graph --upgrade -o none >/dev/null 2>&1 || true
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq not found. In Azure Cloud Shell it should exist by default." >&2
+  exit 1
+fi
+
+# -----------------------------
+# Get subscriptions
+# -----------------------------
+mapfile -t SUBS < <(az account list --query "[?state=='Enabled'].id" -o tsv)
+
+if [ "${#SUBS[@]}" -eq 0 ]; then
+  echo "ERROR: No enabled subscriptions found. Are you logged in?" >&2
+  exit 1
+fi
+
+# -----------------------------
+# KQL (Azure Resource Graph) query
+# -----------------------------
+# Notes:
+# - Defender for Cloud recommendations are stored as microsoft.security/assessments in the securityresources table.
+# - Risk fields (risk.level, risk.riskFactors, risk.attackPathsReferences) are included when risk prioritization is available.
+read -r -d '' KQL_BASE <<'KQL'
+securityresources
+| where type =~ "microsoft.security/assessments"
+| extend assessmentType = tostring(properties.metadata.assessmentType)
+| where assessmentType in~ ("BuiltIn", "BuiltInPolicy", "CustomPolicy", "CustomerManaged", "ManualBuiltInPolicy", "ManualCustomPolicy")
+| extend assessmentId = tolower(id)
+| extend assessmentKey = name
+| extend source = trim(' ', tolower(tostring(properties.resourceDetails.Source)))
+| extend statusCode = tostring(properties.status.code)
+| extend resourceId = trim(" ", tolower(tostring(case(
+    source =~ "azure", properties.resourceDetails.Id,
+    (source =~ "aws" and isnotempty(tostring(properties.resourceDetails.ConnectorId))), properties.resourceDetails.Id,
+    (source =~ "gcp" and isnotempty(tostring(properties.resourceDetails.ConnectorId))), properties.resourceDetails.Id,
+    source =~ "aws", properties.resourceDetails.AzureResourceId,
+    source =~ "gcp", properties.resourceDetails.AzureResourceId,
+    extract("^(?i)(.+)/providers/Microsoft.Security/assessments/.+$",1,id)
+))))
+| extend resourceName = tostring(coalesce(
+    properties.resourceDetails.ResourceName,
+    properties.additionalData.CloudNativeResourceName,
+    properties.additionalData.ResourceName,
+    properties.additionalData.resourceName,
+    split(resourceId, '/')[-1]
+))
+| extend resourceType = tolower(tostring(coalesce(properties.resourceDetails.ResourceType, properties.additionalData.ResourceType)))
+| extend severity = tostring(properties.metadata.severity)
+| extend remediation = tostring(properties.metadata.remediationDescription)
+| extend description = tostring(properties.metadata.description)
+| extend portalUri = tostring(properties.links.azurePortalUri)
+| extend riskLevel = tostring(properties.risk.level)
+| extend riskFactors = tostring(iff(isnull(properties.risk.riskFactors), dynamic([]), properties.risk.riskFactors))
+| extend attackPaths = tostring(array_length(iff(isnull(properties.risk.attackPathsReferences), dynamic([]), properties.risk.attackPathsReferences)))
+| extend resourceGroup = tostring(extract(@"(?i)/resourceGroups/([^/]+)", 1, resourceId))
+| extend additionalData = tostring(properties.additionalData)
+| project subscriptionId=tostring(subscriptionId),
+          assessmentKey,
+          recommendation=tostring(properties.displayName),
+          statusCode,
+          severity,
+          riskLevel,
+          riskFactors,
+          attackPaths,
+          resourceId,
+          resourceGroup,
+          resourceName,
+          resourceType,
+          remediation,
+          description,
+          portalUri,
+          assessmentId,
+          additionalData
+KQL
+
+# Apply optional status filter
+KQL="$KQL_BASE"
+if [ "${STATUS_FILTER}" != "ALL" ]; then
+  # add filter after statusCode is created
+  KQL="$(printf "%s\n| where statusCode =~ \"%s\"\n" "$KQL_BASE" "$STATUS_FILTER")"
+fi
+
+# -----------------------------
+# Write CSV header
+# -----------------------------
+echo '"subscriptionId","subscriptionName","assessmentKey","recommendation","statusCode","severity","riskLevel","riskFactors","attackPaths","resourceId","resourceGroup","resourceName","resourceType","remediation","description","portalUri","assessmentId","additionalData"' > "$OUT_CSV"
+: > "$OUT_JSONL"
+
+# -----------------------------
+# Export per subscription with pagination (skipToken)
+# -----------------------------
+for sub in "${SUBS[@]}"; do
+  sub_name="$(az account show --subscription "$sub" --query name -o tsv 2>/dev/null || echo "")"
+  echo "Exporting subscription: ${sub}  (${sub_name})" >&2
+
+  skip_token=""
+  while :; do
+    if [ -z "$skip_token" ]; then
+      resp="$(az graph query -q "$KQL" --subscriptions "$sub" --first "$PAGE_SIZE" -o json)"
+    else
+      resp="$(az graph query -q "$KQL" --subscriptions "$sub" --first "$PAGE_SIZE" --skip-token "$skip_token" -o json)"
+    fi
+
+    # Append JSONL (one JSON object per line)
+    echo "$resp" | jq -c --arg subName "$sub_name" '.data[] | .subscriptionName=$subName' >> "$OUT_JSONL"
+
+    # Append CSV (sanitize newlines)
+    echo "$resp" | jq -r --arg subName "$sub_name" '
+      .data[] |
+      [
+        .subscriptionId,
+        $subName,
+        .assessmentKey,
+        .recommendation,
+        .statusCode,
+        .severity,
+        .riskLevel,
+        .riskFactors,
+        .attackPaths,
+        .resourceId,
+        .resourceGroup,
+        .resourceName,
+        .resourceType,
+        .remediation,
+        .description,
+        .portalUri,
+        .assessmentId,
+        .additionalData
+      ]
+      | map(if .==null then "" else (tostring | gsub("\r\n|\n|\r"; " ")) end)
+      | @csv
+    ' >> "$OUT_CSV"
+
+    skip_token="$(echo "$resp" | jq -r '.skipToken // empty')"
+    [ -z "$skip_token" ] && break
+  done
+done
+
+echo ""
+echo "DONE"
+echo "CSV  : $OUT_CSV"
+echo "JSONL: $OUT_JSONL"
+echo ""
+echo "Tip: download files from Cloud Shell -> 'Manage files' -> Download"
+EOF
+
+chmod +x export_defender_recommendations.sh
+
+# Run it (default: Unhealthy only)
+./export_defender_recommendations.sh
+
+# If you want ALL statuses:
+# STATUS_FILTER=ALL ./export_defender_recommendations.sh
