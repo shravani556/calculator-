@@ -1,3 +1,52 @@
+Sure — here are the full (copy/paste) official Microsoft Learn links for each remediation item.
+
+Machines should have secrets findings resolved
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/remediate-server-secrets
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/secrets-scanning-servers
+
+Windows servers should be configured to use secure communication protocols
+https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings
+https://learn.microsoft.com/en-us/windows/win32/secauthn/protocols-in-tls-ssl--schannel-ssp-
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/security-baseline-guest-configuration
+https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/guest-configuration
+https://learn.microsoft.com/en-us/azure/governance/machine-configuration/overview/02-setup-prerequisites
+
+Azure running container images should have vulnerabilities resolved
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/view-and-remediate-vulnerabilities-for-images-secure-score
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/view-and-remediate-vulnerabilities-containers
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/agentless-vulnerability-assessment-azure
+
+
+(If you also want the “images in registry” remediation reference:)
+
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/view-and-remediate-vulnerability-registry-images
+
+FTPS should be required in Function Apps
+https://learn.microsoft.com/en-us/azure/app-service/deploy-ftp
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/recommendations-reference-app-services
+
+API endpoints in Azure API Management should be authenticated
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/recommendations-reference-api
+https://learn.microsoft.com/en-us/azure/api-management/api-management-subscriptions
+https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy
+https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-mutual-certificates-for-clients
+https://learn.microsoft.com/en-us/azure/api-management/validate-client-certificate-policy
+https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-protect-backend-with-aad
+https://learn.microsoft.com/en-us/azure/api-management/protect-with-defender-for-apis
+
+Authentication should be enabled on API endpoints hosted in Function Apps
+https://learn.microsoft.com/en-us/azure/app-service/overview-authentication-authorization
+https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-provider-aad
+https://learn.microsoft.com/en-us/azure/azure-functions/security-concepts
+
+SQL databases should have vulnerability findings resolved
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-overview
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-enable
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/sql-azure-vulnerability-assessment-find
+https://learn.microsoft.com/en-us/azure/defender-for-cloud/configure-vulnerability-findings-express
+
+
+
 1) Machines should have secrets findings resolved
 
 Remediate (Portal)
