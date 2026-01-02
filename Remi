@@ -1,0 +1,56 @@
+Recommended – Easy Auth)
+Step-by-step
+Azure Portal → Function App
+Go to Settings → Authentication
+Click Add identity provider
+Choose Microsoft Entra ID
+Configure:
+Tenant: Current tenant
+App registration: Create new or Existing
+Under Action to take when request is not authenticated:
+✅ Require authentication
+Save
+📘 Microsoft Learn
+https://learn.microsoft.com/azure/app-service/configure-authentication-provider-aad
+🔹 Block Anonymous Requests (Important)
+After enabling authentication:
+Ensure Anonymous access = Disabled
+Unauthenticated calls must return 401
+📘
+https://learn.microsoft.com/azure/app-service/overview-authentication-authorization
+🔹 Verify (Mandatory for Defender)
+Test your endpoint:
+Copy code
+Bash
+curl https://<functionapp>.azurewebsites.net/api/<function>
+Expected:
+❌ Without token → 401 Unauthorized
+✅ With token → 200 OK
+Defender will re-check within 24 hours.
+3️⃣ Terraform – Precise Configuration
+🔹 Enable Entra Authentication on Function App
+Copy code
+Hcl
+resource "azurerm_linux_function_app" "func" {
+  name                = "sample-func"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  service_plan_id     = azurerm_service_plan.plan.id
+
+  site_config {}
+
+  auth_settings_v2 {
+    auth_enabled = true
+
+    login {
+      token_store_enabled = true
+    }
+
+    active_directory_v2 {
+      client_id            = azurerm_ad_application.app.application_id
+      tenant_auth_endpoint = "https://login.microsoftonline.com/${var.tenant_id}/v2.0"
+    }
+
+    default_provider = "azureactivedirectory"
+  }
+}
