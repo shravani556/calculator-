@@ -1,3 +1,129 @@
+Here’s how you can remediate the APIM issue (authenticate API endpoints) via the Azure Portal steps + Terraform code + official Microsoft docs links.
+✅ 1) Portal Steps – Enforce Authentication
+A) Subscription Key (Basic)
+Go to API Management instance in Azure Portal.
+Open APIs → Select your API.
+On Settings, enable Require subscription key.
+Save & test calls with valid key.
+Subscription key enforcement ensures clients must send a valid APIM subscription key. This is basic auth.�
+Microsoft Learn
+B) OAuth2 / JWT Validation
+To require bearer token validation:
+Go to API Management instance → APIs.
+Select API (or Operation) → Design.
+Click Inbound processing → Add policy.
+Choose Validate JWT or Validate Microsoft Entra token.
+Fill:
+Issuer / Audience
+Header = Authorization
+OpenID config URL
+Save policy.
+💡 You can validate an access token from Microsoft Entra ID / OAuth2 provider.�
+Microsoft Learn +1
+Documentation Link (Validate JWT policy):
+👉 https://learn.microsoft.com/azure/api-management/validate-jwt-policy �
+Microsoft Learn
+C) Mutual TLS (Client Certificate Validation)
+To require mTLS (certificate from client):
+In APIM instance, go to Security → Certificates.
+Upload certificate (or configure Key Vault certificate).
+Edit API → Inbound processing → Add policy:
+Copy code
+Xml
+<validate-client-certificate>
+    <identities>
+        <identity thumbprint="THUMBPRINT_OF_CERT"/>
+    </identities>
+</validate-client-certificate>
+Save & test.
+Docs (client certificate validation):
+👉 https://learn.microsoft.com/azure/api-management/validate-client-certificate-policy �
+Microsoft Learn
+✅ 2) Terraform Approach
+A) API JWT Policy in Terraform
+Use azurerm_api_management_api_operation_policy to set policy XML:
+Copy code
+Hcl
+resource "azurerm_api_management_api_operation_policy" "jwt_policy" {
+  resource_group_name  = azurerm_resource_group.rg.name
+  api_management_name  = azurerm_api_management.apim.name
+  api_name             = azurerm_api_management_api.example.name
+  operation_id         = "get"  # operation id
+  xml_content = <<-XML
+    <policies>
+      <inbound>
+        <validate-jwt header-name="Authorization" require-scheme="Bearer">
+          <openid-config url="https://login.microsoftonline.com/<TENANT_ID>/v2.0/.well-known/openid-configuration" />
+          <audiences>
+            <audience><CLIENT_ID_OR_API_ID_URI></audience>
+          </audiences>
+        </validate-jwt>
+      </inbound>
+      <backend>
+        <base />
+      </backend>
+      <outbound>
+        <base />
+      </outbound>
+    </policies>
+  XML
+}
+✔ This will enforce JWT on API operation. �
+Terraform Registry
+B) Client Certificate (mTLS) in Terraform
+Terraform doesn’t have a direct “validate-client-cert” resource so you embed into policy:
+Copy code
+Hcl
+resource "azurerm_api_management_api_operation_policy" "cert_policy" {
+  resource_group_name  = azurerm_resource_group.rg.name
+  api_management_name  = azurerm_api_management.apim.name
+  api_name             = azurerm_api_management_api.example.name
+  operation_id         = "post"
+  
+  xml_content = <<-XML
+    <policies>
+      <inbound>
+        <validate-client-certificate>
+          <identities>
+            <identity thumbprint="YOUR_CERT_THUMBPRINT"/>
+          </identities>
+        </validate-client-certificate>
+      </inbound>
+      <backend><base /></backend>
+      <outbound><base /></outbound>
+    </policies>
+  XML
+}
+You must upload the client certificate to APIM or use Key Vault and reference it. �
+Microsoft Learn
+🧠 3) Helpful Official Microsoft Docs
+Purpose
+Link
+JWT validation policy overview
+https://learn.microsoft.com/azure/api-management/validate-jwt-policy �
+Microsoft Learn
+Microsoft Entra token validation
+https://learn.microsoft.com/azure/api-management/validate-azure-ad-token-policy �
+Microsoft Learn
+Client certificate validation
+https://learn.microsoft.com/azure/api-management/validate-client-certificate-policy �
+Microsoft Learn
+Policy reference
+https://learn.microsoft.com/azure/api-management/api-management-policies �
+Microsoft Learn
+Terraform policy resource
+https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/api_management_api_operation_policy �
+Terraform Registry
+🧾 Summary
+Authentication mechanisms you can enforce: ✔ Subscription key (portal config) �
+✔ OAuth2/JWT validation via validate-jwt / validate-azure-ad-token policy �
+✔ Mutual TLS (client certificate) validation �
+Microsoft Learn
+Microsoft Learn +1
+Microsoft Learn
+If you want, I can also provide a complete Terraform template example including API Management + API + product + authentication policies 👨‍💻✨
+
+
 Sure — here are the full (copy/paste) official Microsoft Learn links for each remediation item.
 
 Machines should have secrets findings resolved
