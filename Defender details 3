@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==========================
+# Filters (edit if needed)
+# ==========================
+# Use ALL first (recommended). Many sub-assessments are NotApplicable/Healthy.
+STATUS_FILTER="${STATUS_FILTER:-ALL}"   # ALL | Unhealthy | Healthy | NotApplicable
+TIME_RANGE="${TIME_RANGE:-}"           # e.g. 1h, 24h, 7d, 30d, or "" (no time filter)
+PAGE_SIZE="${PAGE_SIZE:-1000}"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_DIR="defender_subassessments_export_${TS}"
+mkdir -p "$OUT_DIR"
+
+OUT_CSV="${OUT_DIR}/defender_subassessments.csv"
+OUT_JSONL="${OUT_DIR}/defender_subassessments.jsonl"
+
+# ==========================
+# Prereqs
+# ==========================
+az extension add --name resource-graph --upgrade -o none >/dev/null 2>&1 || true
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq not found." >&2; exit 1; }
+
+# ==========================
+# Get enabled subscriptions (id + name)
+# ==========================
+subs_list="$(az account list --query "[?state=='Enabled'].{id:id,name:name}" -o tsv 2>/dev/null || true)"
+if [ -z "$subs_list" ]; then
+  echo "ERROR: No enabled subscriptions returned. Try: az account list -o table" >&2
+  exit 1
+fi
+
+# ==========================
+# KQL for Sub-Assessments
+#   - assessedResourceId is taken from:
+#       1) properties.resourceDetails.id (when present)
+#       2) otherwise extracted from the sub-assessment ARM id by removing
+#          "/providers/Microsoft.Security/assessments/<key>/subassessments/<id>"
+#   - assessedResourceGroup is extracted from assessedResourceId, fallback to record's resourceGroup
+# ==========================
+KQL_BASE=$(cat <<'KQL'
+securityresources
+| where type =~ "microsoft.security/assessments/subassessments"
+| extend assessmentKey = tostring(extract(@"(?i)providers/Microsoft.Security/assessments/([^/]*)", 1, id))
+| extend subAssessmentKey = tostring(name)
+| extend assessedFromId = tostring(extract(@"(?i)^(.*)/providers/Microsoft.Security/assessments/[^/]+/subassessments/[^/]+$", 1, id))
+| extend assessedResourceId = tolower(tostring(coalesce(
+    properties.resourceDetails.id,
+    properties.resourceDetails.Id,
+    assessedFromId
+)))
+| extend assessedResourceGroup = tostring(coalesce(
+    tostring(resourceGroup),
+    extract(@"(?i)/resourceGroups/([^/]+)", 1, assessedResourceId)
+))
+| extend assessedResourceName = tostring(split(assessedResourceId, "/")[-1])
+| extend assessedResourceType = tostring(extract(@"(?i)/providers/([^/]+/[^/]+)", 1, assessedResourceId))
+
+| extend statusCode = tostring(properties.status.code)
+| extend severity = tostring(coalesce(properties.status.severity, properties.metadata.severity))
+| extend timeGenerated = todatetime(properties.timeGenerated)
+
+| extend findingId = tostring(properties.id)
+| extend findingDisplayName = tostring(properties.displayName)
+
+| extend cveId = tostring(coalesce(
+    properties.additionalData.vulnerabilityDetails.cveId,
+    properties.additionalData.cve,
+    properties.id
+))
+| extend packageName = tostring(properties.additionalData.softwareDetails.packageName)
+| extend vulnSeverity = tostring(properties.additionalData.vulnerabilityDetails.severity)
+
+| extend description = tostring(properties.description)
+| extend remediation = tostring(properties.remediation)
+| extend portalUri = tostring(properties.links.azurePortalUri)
+
+| project
+    subscriptionId=tostring(subscriptionId),
+    assessedResourceGroup,
+    assessedResourceId,
+    assessedResourceType,
+    assessedResourceName,
+    assessmentKey,
+    subAssessmentKey,
+    statusCode,
+    severity,
+    timeGenerated,
+    findingId,
+    findingDisplayName,
+    cveId,
+    packageName,
+    vulnSeverity,
+    description,
+    remediation,
+    portalUri,
+    subAssessmentResourceId=tostring(id),
+    additionalData=tostring(properties.additionalData)
+KQL
+)
+
+KQL="$KQL_BASE"
+
+if [ "$STATUS_FILTER" != "ALL" ]; then
+  KQL="$KQL
+| where statusCode =~ \"$STATUS_FILTER\""
+fi
+
+if [ -n "$TIME_RANGE" ]; then
+  KQL="$KQL
+| where timeGenerated > ago($TIME_RANGE)"
+fi
+
+# ==========================
+# Output headers
+# ==========================
+echo '"subscriptionId","subscriptionName","assessedResourceGroup","assessedResourceId","assessedResourceType","assessedResourceName","assessmentKey","subAssessmentKey","statusCode","severity","timeGenerated","findingId","findingDisplayName","cveId","packageName","vulnSeverity","description","remediation","portalUri","subAssessmentResourceId","additionalData"' > "$OUT_CSV"
+: > "$OUT_JSONL"
+
+# ==========================
+# Export per subscription with pagination
+# ==========================
+while IFS=$'\t' read -r sub_id sub_name; do
+  [ -z "$sub_id" ] && continue
+  echo "Exporting: $sub_id ($sub_name)" >&2
+
+  skip_token=""
+  while :; do
+    if [ -z "$skip_token" ]; then
+      resp="$(az graph query -q "$KQL" --subscriptions "$sub_id" --first "$PAGE_SIZE" -o json)"
+    else
+      resp="$(az graph query -q "$KQL" --subscriptions "$sub_id" --first "$PAGE_SIZE" --skip-token "$skip_token" -o json)"
+    fi
+
+    # JSONL (one JSON object per line)
+    echo "$resp" | jq -c --arg subName "$sub_name" '.data[] | .subscriptionName=$subName' >> "$OUT_JSONL"
+
+    # CSV
+    echo "$resp" | jq -r --arg subName "$sub_name" '
+      .data[] |
+      [
+        .subscriptionId,
+        $subName,
+        .assessedResourceGroup,
+        .assessedResourceId,
+        .assessedResourceType,
+        .assessedResourceName,
+        .assessmentKey,
+        .subAssessmentKey,
+        .statusCode,
+        .severity,
+        (.timeGenerated // ""),
+        .findingId,
+        .findingDisplayName,
+        .cveId,
+        .packageName,
+        .vulnSeverity,
+        .description,
+        .remediation,
+        .portalUri,
+        .subAssessmentResourceId,
+        .additionalData
+      ]
+      | map(if .==null then "" else (tostring | gsub("\r\n|\n|\r"; " ")) end)
+      | @csv
+    ' >> "$OUT_CSV"
+
+    skip_token="$(echo "$resp" | jq -r '.skipToken // empty')"
+    [ -z "$skip_token" ] && break
+  done
+
+done <<< "$subs_list"
+
+echo ""
+echo "DONE"
+echo "CSV  : $OUT_CSV"
+echo "JSONL: $OUT_JSONL"
+echo "Download in Cloud Shell: Manage files -> Download"
