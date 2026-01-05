@@ -1,4 +1,31 @@
-Here’s how you can remediate the APIM issue (authenticate API endpoints) via the Azure Portal steps + Terraform code + official Microsoft docs links.
+Hi Team,
+
+We have scheduled the following change for Tuesday at 10:00 PM and would like to coordinate with the application team prior to implementation.
+
+Change ID: CHG0058309
+Application: A00014
+Change Details: Enable auto-key rotation policy for VM Disk Encryption Set
+
+Impact:
+
+- No application impact expected
+- No service downtime anticipated during the change window
+
+Kindly review the change and confirm your availability and approval for the scheduled window.
+Please let us know if there are any concerns, dependencies, or objections from the application side.
+
+Upon receiving your confirmation, we will proceed as per the approved change schedule.
+
+Thanks & regards,
+Shravani Banda
+
+---
+
+If you want, I can also:
+
+- Add a rollback/backout note
+- Align wording exactly with ServiceNow risk section
+- Make it very concise (2–3 lines)Here’s how you can remediate the APIM issue (authenticate API endpoints) via the Azure Portal steps + Terraform code + official Microsoft docs links.
 ✅ 1) Portal Steps – Enforce Authentication
 A) Subscription Key (Basic)
 Go to API Management instance in Azure Portal.
