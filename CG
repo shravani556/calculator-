@@ -1,5 +1,39 @@
 Hi Team,
 
+We would like to request your approval to proceed with creating a change for A00035, noting that only the PROD environment exists for this application.
+
+Proposed Change Details:
+
+- Application: A00035 (PROD only)
+- Change: Enable auto-key rotation policy for VM Disk Encryption Set
+- Planned Window: Tuesday (PST)
+- Expected Impact: No application impact
+- Downtime: No service downtime expected
+
+Kindly review the above and confirm your approval to move forward with change creation for the proposed window.
+Please let us know if you have any concerns or dependencies from the application side.
+
+Thanks & regards,
+Shravani Banda
+
+---
+
+✅ Why this fits your need
+
+- Clearly asks for permission (not execution)
+- Mentions PROD-only clearly
+- Uses safe, approval language
+- Audit-friendly wording
+
+If you want, I can:
+
+- Add exact PST time
+- Make it more formal / concise
+- Adjust tone for US-based app teams
+
+
+Hi Team,
+
 We have scheduled the following change for Tuesday at 10:00 PM and would like to coordinate with the application team prior to implementation.
 
 Change ID: CHG0058309
