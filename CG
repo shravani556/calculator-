@@ -1,3 +1,29 @@
+
+Hi Sonu,
+
+Please find my weekly status update below.
+
+Summary of Work Completed:
+
+- Reviewed and verified recent Jira items to understand the environments involved and the changes implemented, especially in DEV.
+- As part of my assignment for UAT and PROD, I validated that Enable Auto-Key Rotation on VM Disk Encryption Set is already deployed in lower environments such as DEV and CTD.
+- Proceeded with A00014, which includes UAT and PROD environments.
+- Executed the pipeline to review the Terraform plan and validated the expected changes.
+
+Additional Activities:
+
+- In parallel, I completed work related to GH300.
+- Raised the required request for GitHub Actions.
+- Started preparing and organizing the necessary documentation and prerequisites during this period.
+
+Going forward, I will continue to utilize the allocated hours efficiently and ensure timely completion of assigned tasks.
+
+Please let me know if you need any additional details.
+
+Thanks & regards,
+Sravani B
+
+
 Hi Team,
 
 We would like to request your approval to proceed with creating a change for A00035, noting that only the PROD environment exists for this application.
