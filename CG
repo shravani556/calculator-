@@ -1,3 +1,20 @@
+Terraform changes have been applied to update the ProdFileBackupPolicy as per Jira requirements.
+✔ Backup frequency remains Hourly
+✔ Backup window duration updated from 16 → 24 hours
+✔ Daily retention updated from 30 → 14 days
+✔ Policy updated in-place without recreation
+Terraform plan validated successfully and changes are aligned with the expected configuration mentioned
+
+
+
+Terraform plan initially failed due to an unsupported attribute reference in the file_shares module.
+Error observed:
+This object does not have an attribute named "recovery_vault_key"
+The issue was caused by referencing each.value.recovery_vault_key in main.tf, while the file_shares input object does not define this attribute.
+The fix involves correcting the recovery vault key mapping to align with the actual attributes defined in the file_shares configuration.
+This is a configuration reference issue and not related to backup policy settings. Resolution is in progress.
+
+
 
 Hi Sonu,
 
