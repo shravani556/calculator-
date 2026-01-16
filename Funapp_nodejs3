@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+set -e
+set -u
+set -o pipefail
+
+# =========================
+# Configuration (env vars)
+# =========================
+SUBSCRIPTIONS="${SUBSCRIPTIONS:-}"      # comma-separated; empty => all enabled
+OUT_PREFIX="${OUT_PREFIX:-./functionapps-runtime-inventory}"
+INCLUDE_SLOTS="${INCLUDE_SLOTS:-0}"     # 0/1
+SITES_API_VERSION="${SITES_API_VERSION:-2023-12-01}"
+
+# Optional: reduce calls (faster)
+SKIP_PLAN_LOOKUP="${SKIP_PLAN_LOOKUP:-0}"   # 1 => don't resolve plan name/sku (saves time)
+
+OUT_CSV="${OUT_PREFIX}.csv"
+OUT_TSV="${OUT_PREFIX}.tsv"
+OUT_NODE_CSV="${OUT_PREFIX}.node-only.csv"
+OUT_NODE20_CSV="${OUT_PREFIX}.node20.csv"
+
+# =========================
+# Helpers
+# =========================
+die() { echo "ERROR: $*" >&2; exit 1; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
+
+norm() {
+  local v="${1:-}"
+  if [ "$v" = "null" ] || [ "$v" = "None" ]; then
+    echo ""
+  else
+    echo "$v"
+  fi
+}
+
+lower() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+
+csv_escape() {
+  local s="${1:-}"
+  s="${s//$'\r'/}"
+  s="${s//\"/\"\"}"
+  printf '"%s"' "$s"
+}
+
+tsv_clean() {
+  local s="${1:-}"
+  s="${s//$'\r'/}"
+  s="${s//$'\n'/ }"
+  s="${s//$'\t'/ }"
+  printf '%s' "$s"
+}
+
+# Cache files
+PLAN_CACHE_FILE="$(mktemp -t plan_cache.XXXXXX 2>/dev/null || mktemp)"
+WORKLIST_FILE="$(mktemp -t fa_worklist.XXXXXX 2>/dev/null || mktemp)"
+cleanup() {
+  rm -f "$PLAN_CACHE_FILE" "$WORKLIST_FILE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+get_plan_cached() {
+  local sub="$1"
+  local plan_id
+  plan_id="$(norm "${2:-}")"
+
+  if [ "$SKIP_PLAN_LOOKUP" = "1" ]; then
+    printf "\t"
+    return 0
+  fi
+
+  if [ -z "$plan_id" ]; then
+    printf "\t"
+    return 0
+  fi
+
+  local cached
+  cached="$(awk -F '\t' -v id="$plan_id" '$1==id {print $2 "\t" $3; exit}' "$PLAN_CACHE_FILE" 2>/dev/null || true)"
+  if [ -n "$cached" ]; then
+    printf "%s" "$cached"
+    return 0
+  fi
+
+  local out plan_name plan_sku
+  out="$(az appservice plan show --only-show-errors --subscription "$sub" --ids "$plan_id" \
+        --query "[name, sku.name]" -o tsv 2>/dev/null || true)"
+
+  if [ -n "$out" ]; then
+    plan_name="$(printf "%s" "$out" | awk -F '\t' '{print $1}')"
+    plan_sku="$(printf "%s" "$out" | awk -F '\t' '{print $2}')"
+    plan_name="$(norm "$plan_name")"
+    plan_sku="$(norm "$plan_sku")"
+    printf "%s\t%s\t%s\n" "$plan_id" "$plan_name" "$plan_sku" >> "$PLAN_CACHE_FILE"
+    printf "%s\t%s" "$plan_name" "$plan_sku"
+    return 0
+  fi
+
+  printf "%s\t\t\n" "$plan_id" >> "$PLAN_CACHE_FILE"
+  printf "\t"
+}
+
+write_row() {
+  # Writes one row to TSV and CSV
+  local i=1
+  local first=1
+  local tsv_line=""
+
+  while [ $i -le $# ]; do
+    local v="${!i}"
+    v="$(tsv_clean "$v")"
+    if [ $first -eq 1 ]; then
+      tsv_line="${v}"
+      first=0
+    else
+      tsv_line="${tsv_line}\t${v}"
+    fi
+    i=$((i+1))
+  done
+  printf "%b\n" "$tsv_line" >> "$OUT_TSV"
+
+  i=1
+  first=1
+  while [ $i -le $# ]; do
+    local cv="${!i}"
+    if [ $first -eq 1 ]; then
+      csv_escape "$cv" >> "$OUT_CSV"
+      first=0
+    else
+      printf "," >> "$OUT_CSV"
+      csv_escape "$cv" >> "$OUT_CSV"
+    fi
+    i=$((i+1))
+  done
+  printf "\n" >> "$OUT_CSV"
+}
+
+process_one_site() {
+  local sub="$1"
+  local subName="$2"
+  local rg="$3"
+  local appName="$4"
+  local resourceId="$5"
+  local location="$6"
+  local kind="$7"
+  local reserved="$8"
+  local serverFarmId="$9"
+  local slot="${10:-}"   # empty => production
+
+  local slotLabel="$slot"; [ -z "$slotLabel" ] && slotLabel="production"
+
+  local osType="Windows"
+  if [ "$(norm "$reserved")" = "true" ]; then osType="Linux"; fi
+
+  # Plan info
+  local planName="" planSku=""
+  if [ -n "$(norm "$serverFarmId")" ]; then
+    local planOut
+    planOut="$(get_plan_cached "$sub" "$serverFarmId")"
+    planName="$(printf "%s" "$planOut" | awk -F '\t' '{print $1}')"
+    planSku="$(printf "%s" "$planOut" | awk -F '\t' '{print $2}')"
+  fi
+
+  # siteConfig
+  local cfgOut linuxFxVersion windowsFxVersion siteConfigNodeVersion
+  cfgOut=""
+  if [ -n "$slot" ]; then
+    cfgOut="$(az functionapp config show --only-show-errors --subscription "$sub" -g "$rg" -n "$appName" --slot "$slot" \
+      --query "[linuxFxVersion, windowsFxVersion, nodeVersion]" -o tsv 2>/dev/null || true)"
+  else
+    cfgOut="$(az functionapp config show --only-show-errors --subscription "$sub" -g "$rg" -n "$appName" \
+      --query "[linuxFxVersion, windowsFxVersion, nodeVersion]" -o tsv 2>/dev/null || true)"
+  fi
+
+  linuxFxVersion="$(norm "$(printf "%s" "$cfgOut" | awk -F '\t' '{print $1}')")"
+  windowsFxVersion="$(norm "$(printf "%s" "$cfgOut" | awk -F '\t' '{print $2}')")"
+  siteConfigNodeVersion="$(norm "$(printf "%s" "$cfgOut" | awk -F '\t' '{print $3}')")"
+
+  # app settings
+  local settingsOut functionsWorkerRuntime functionsExtensionVersion websiteNodeDefaultVersion websiteNodeVersion
+  functionsWorkerRuntime=""; functionsExtensionVersion=""; websiteNodeDefaultVersion=""; websiteNodeVersion=""
+
+  if [ -n "$slot" ]; then
+    settingsOut="$(az functionapp config appsettings list --only-show-errors --subscription "$sub" -g "$rg" -n "$appName" --slot "$slot" \
+      --query "[?name=='FUNCTIONS_WORKER_RUNTIME' || name=='FUNCTIONS_EXTENSION_VERSION' || name=='WEBSITE_NODE_DEFAULT_VERSION' || name=='WEBSITE_NODE_VERSION'].[name,value]" -o tsv 2>/dev/null || true)"
+  else
+    settingsOut="$(az functionapp config appsettings list --only-show-errors --subscription "$sub" -g "$rg" -n "$appName" \
+      --query "[?name=='FUNCTIONS_WORKER_RUNTIME' || name=='FUNCTIONS_EXTENSION_VERSION' || name=='WEBSITE_NODE_DEFAULT_VERSION' || name=='WEBSITE_NODE_VERSION'].[name,value]" -o tsv 2>/dev/null || true)"
+  fi
+
+  if [ -n "$settingsOut" ]; then
+    while IFS=$'\t' read -r k v; do
+      k="$(norm "$k")"; v="$(norm "$v")"
+      case "$k" in
+        FUNCTIONS_WORKER_RUNTIME) functionsWorkerRuntime="$v" ;;
+        FUNCTIONS_EXTENSION_VERSION) functionsExtensionVersion="$v" ;;
+        WEBSITE_NODE_DEFAULT_VERSION) websiteNodeDefaultVersion="$v" ;;
+        WEBSITE_NODE_VERSION) websiteNodeVersion="$v" ;;
+      esac
+    done <<EOF
+$settingsOut
+EOF
+  fi
+
+  # Flex runtime (if present)
+  local flexOut functionAppConfigRuntimeName functionAppConfigRuntimeVersion
+  functionAppConfigRuntimeName=""; functionAppConfigRuntimeVersion=""
+  flexOut="$(az resource show --only-show-errors --subscription "$sub" --ids "$resourceId" --api-version "$SITES_API_VERSION" \
+    --query "[properties.functionAppConfig.runtime.name, properties.functionAppConfig.runtime.version]" -o tsv 2>/dev/null || true)"
+  if [ -n "$flexOut" ]; then
+    functionAppConfigRuntimeName="$(norm "$(printf "%s" "$flexOut" | awk -F '\t' '{print $1}')")"
+    functionAppConfigRuntimeVersion="$(norm "$(printf "%s" "$flexOut" | awk -F '\t' '{print $2}')")"
+  fi
+
+  # runtime summary
+  local runtimeSummary runtimeSource
+  runtimeSummary=""; runtimeSource=""
+
+  if [ -n "$functionAppConfigRuntimeName" ]; then
+    runtimeSummary="${functionAppConfigRuntimeName} ${functionAppConfigRuntimeVersion}"
+    runtimeSource="functionAppConfig.runtime"
+  elif [ -n "$linuxFxVersion" ] && printf "%s" "$linuxFxVersion" | grep -q '|'; then
+    runtimeSummary="${linuxFxVersion%%|*} ${linuxFxVersion#*|}"
+    runtimeSource="siteConfig.linuxFxVersion"
+  elif [ -n "$windowsFxVersion" ] && printf "%s" "$windowsFxVersion" | grep -q '|'; then
+    runtimeSummary="${windowsFxVersion%%|*} ${windowsFxVersion#*|}"
+    runtimeSource="siteConfig.windowsFxVersion"
+  elif [ -n "$functionsWorkerRuntime" ]; then
+    runtimeSummary="${functionsWorkerRuntime}"
+    runtimeSource="FUNCTIONS_WORKER_RUNTIME"
+  fi
+
+  # Node detection + node version
+  local isNode nodeVersionDetected nodeVersionSource nodeMajor
+  isNode="false"; nodeVersionDetected=""; nodeVersionSource=""; nodeMajor=""
+
+  if [ "$(lower "$functionAppConfigRuntimeName")" = "node" ]; then isNode="true"; fi
+  if [ "$(lower "$functionsWorkerRuntime")" = "node" ]; then isNode="true"; fi
+  case "$(lower "$linuxFxVersion")" in node\|*) isNode="true" ;; esac
+  case "$(lower "$windowsFxVersion")" in node\|*) isNode="true" ;; esac
+
+  if [ "$isNode" = "true" ]; then
+    if [ "$(lower "$functionAppConfigRuntimeName")" = "node" ] && [ -n "$functionAppConfigRuntimeVersion" ]; then
+      nodeVersionDetected="$functionAppConfigRuntimeVersion"
+      nodeVersionSource="functionAppConfig.runtime.version"
+    elif printf "%s" "$(lower "$linuxFxVersion")" | grep -q '^node|'; then
+      nodeVersionDetected="${linuxFxVersion#*|}"
+      nodeVersionSource="siteConfig.linuxFxVersion"
+    elif [ -n "$siteConfigNodeVersion" ]; then
+      nodeVersionDetected="$siteConfigNodeVersion"
+      nodeVersionSource="siteConfig.nodeVersion"
+    elif [ -n "$websiteNodeDefaultVersion" ]; then
+      nodeVersionDetected="$websiteNodeDefaultVersion"
+      nodeVersionSource="appSetting.WEBSITE_NODE_DEFAULT_VERSION"
+    elif [ -n "$websiteNodeVersion" ]; then
+      nodeVersionDetected="$websiteNodeVersion"
+      nodeVersionSource="appSetting.WEBSITE_NODE_VERSION"
+    fi
+
+    if [ -n "$nodeVersionDetected" ]; then
+      nodeMajor="$(printf "%s" "$nodeVersionDetected" | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    fi
+  fi
+
+  # Write outputs (clear columns first)
+  write_row \
+    "$subName" \
+    "$sub" \
+    "$rg" \
+    "$appName" \
+    "$slotLabel" \
+    "$location" \
+    "$osType" \
+    "$planSku" \
+    "$planName" \
+    "$runtimeSummary" \
+    "$runtimeSource" \
+    "$functionsWorkerRuntime" \
+    "$functionsExtensionVersion" \
+    "$nodeMajor" \
+    "$nodeVersionDetected" \
+    "$nodeVersionSource" \
+    "$linuxFxVersion" \
+    "$windowsFxVersion" \
+    "$siteConfigNodeVersion" \
+    "$websiteNodeDefaultVersion" \
+    "$websiteNodeVersion" \
+    "$functionAppConfigRuntimeName" \
+    "$functionAppConfigRuntimeVersion" \
+    "$kind"
+}
+
+# =========================
+# Preflight
+# =========================
+need_cmd az
+if ! az account show --only-show-errors >/dev/null 2>&1; then
+  die "Not logged into Azure CLI. Run: az login"
+fi
+
+# =========================
+# Subscriptions list
+# =========================
+SUBS=()
+if [ -n "$SUBSCRIPTIONS" ]; then
+  OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  SUBS=($SUBSCRIPTIONS)
+  IFS="$OLDIFS"
+else
+  while IFS= read -r sid; do
+    sid="$(norm "$sid")"
+    [ -n "$sid" ] && SUBS+=("$sid")
+  done < <(az account list --only-show-errors --query "[?state=='Enabled'].id" -o tsv)
+fi
+[ "${#SUBS[@]}" -eq 0 ] && die "No subscriptions found."
+
+# =========================
+# Output headers
+# =========================
+TSV_HEADER="subscriptionName\tsubscriptionId\tresourceGroup\tfunctionApp\tslot\tlocation\tosType\tplanSku\tplanName\truntimeSummary\truntimeSource\tfunctionsWorkerRuntime\tfunctionsHostVersion\tnodeMajor\tnodeVersionDetected\tnodeVersionSource\tlinuxFxVersion\twindowsFxVersion\tsiteConfigNodeVersion\tWEBSITE_NODE_DEFAULT_VERSION\tWEBSITE_NODE_VERSION\tfunctionAppConfigRuntimeName\tfunctionAppConfigRuntimeVersion\tkind"
+CSV_HEADER="subscriptionName,subscriptionId,resourceGroup,functionApp,slot,location,osType,planSku,planName,runtimeSummary,runtimeSource,functionsWorkerRuntime,functionsHostVersion,nodeMajor,nodeVersionDetected,nodeVersionSource,linuxFxVersion,windowsFxVersion,siteConfigNodeVersion,WEBSITE_NODE_DEFAULT_VERSION,WEBSITE_NODE_VERSION,functionAppConfigRuntimeName,functionAppConfigRuntimeVersion,kind"
+
+printf "%b\n" "$TSV_HEADER" > "$OUT_TSV"
+printf "%s\n" "$CSV_HEADER" > "$OUT_CSV"
+
+echo "Writing:"
+echo "  TSV: $OUT_TSV"
+echo "  CSV: $OUT_CSV"
+echo "Building scan list (so we can show progress)..."
+
+# =========================
+# Build worklist
+# Columns:
+# subId, subName, rg, appName, resourceId, location, kind, reserved, serverFarmId, slotName
+# =========================
+: > "$WORKLIST_FILE"
+subIndex=0
+
+for sub in "${SUBS[@]}"; do
+  subIndex=$((subIndex+1))
+  sub="$(printf "%s" "$sub" | xargs)"
+  [ -z "$sub" ] && continue
+
+  subName="$(norm "$(az account show --only-show-errors --subscription "$sub" --query "name" -o tsv 2>/dev/null || true)")"
+  echo "  Subscription $subIndex/${#SUBS[@]}: $subName ($sub)" >&2
+
+  APPS_FILE="$(mktemp -t apps.XXXXXX 2>/dev/null || mktemp)"
+  az functionapp list --only-show-errors --subscription "$sub" \
+    --query "[].[name, resourceGroup, id, location, kind, reserved, serverFarmId]" -o tsv 2>/dev/null \
+    > "$APPS_FILE" || true
+
+  appCount="$(wc -l < "$APPS_FILE" | tr -d ' ')"
+  echo "    Found $appCount function app(s)" >&2
+
+  while IFS=$'\t' read -r appName rg appId location kind reserved serverFarmId; do
+    appName="$(norm "$appName")"; rg="$(norm "$rg")"; appId="$(norm "$appId")"
+    location="$(norm "$location")"; kind="$(norm "$kind")"; reserved="$(norm "$reserved")"
+    serverFarmId="$(norm "$serverFarmId")"
+
+    [ -z "$appName" ] && continue
+    [ -z "$rg" ] && continue
+    [ -z "$appId" ] && continue
+
+    # production item
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+      "$sub" "$subName" "$rg" "$appName" "$appId" "$location" "$kind" "$reserved" "$serverFarmId" "" \
+      >> "$WORKLIST_FILE"
+
+    if [ "$INCLUDE_SLOTS" = "1" ]; then
+      SLOTS_FILE="$(mktemp -t slots.XXXXXX 2>/dev/null || mktemp)"
+      az functionapp deployment slot list --only-show-errors --subscription "$sub" -g "$rg" -n "$appName" \
+        --query "[].name" -o tsv 2>/dev/null > "$SLOTS_FILE" || true
+
+      while IFS= read -r slotName; do
+        slotName="$(norm "$slotName")"
+        [ -z "$slotName" ] && continue
+        slotId="${appId}/slots/${slotName}"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+          "$sub" "$subName" "$rg" "$appName" "$slotId" "$location" "$kind" "$reserved" "$serverFarmId" "$slotName" \
+          >> "$WORKLIST_FILE"
+      done < "$SLOTS_FILE"
+      rm -f "$SLOTS_FILE" >/dev/null 2>&1 || true
+    fi
+  done < "$APPS_FILE"
+
+  rm -f "$APPS_FILE" >/dev/null 2>&1 || true
+done
+
+TOTAL="$(wc -l < "$WORKLIST_FILE" | tr -d ' ')"
+echo "Total items to scan: $TOTAL (includes slots=${INCLUDE_SLOTS})" >&2
+echo "Starting scan..." >&2
+
+# =========================
+# Process worklist with progress
+# =========================
+i=0
+while IFS=$'\t' read -r sub subName rg appName resourceId location kind reserved serverFarmId slotName; do
+  i=$((i+1))
+  slotLabel="$slotName"; [ -z "$slotLabel" ] && slotLabel="production"
+  pct=$(( i * 100 / TOTAL ))
+
+  # Live progress line (stderr)
+  printf "\r[%3d%%] Processing %d/%d : %s | %s/%s (%s)                      " \
+    "$pct" "$i" "$TOTAL" "$subName" "$rg" "$appName" "$slotLabel" >&2
+
+  process_one_site "$sub" "$subName" "$rg" "$appName" "$resourceId" "$location" "$kind" "$reserved" "$serverFarmId" "$slotName"
+done < "$WORKLIST_FILE"
+printf "\n" >&2
+
+# =========================
+# Create Node-only CSVs
+# =========================
+if command -v python3 >/dev/null 2>&1; then
+  python3 - <<PY
+import csv
+from pathlib import Path
+
+src = Path("$OUT_CSV")
+node_out = Path("$OUT_NODE_CSV")
+node20_out = Path("$OUT_NODE20_CSV")
+
+with src.open(newline="") as f:
+    r = csv.DictReader(f)
+    rows = list(r)
+
+def is_node(row):
+    return (
+        (row.get("functionsWorkerRuntime","").lower() == "node") or
+        (row.get("functionAppConfigRuntimeName","").lower() == "node") or
+        row.get("linuxFxVersion","").lower().startswith("node|") or
+        row.get("windowsFxVersion","").lower().startswith("node|")
+    )
+
+node_rows = [x for x in rows if is_node(x)]
+node20_rows = [x for x in node_rows if x.get("nodeMajor","") == "20"]
+
+for path, data in [(node_out, node_rows), (node20_out, node20_rows)]:
+    with path.open("w", newline="") as out:
+        w = csv.DictWriter(out, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(data)
+
+print(f"Node apps: {len(node_rows)} -> {node_out}")
+print(f"Node 20 apps: {len(node20_rows)} -> {node20_out}")
+PY
+fi
+
+# =========================
+# Quick preview (TSV is easiest)
+# =========================
+echo ""
+echo "Preview (top 30 rows) from TSV:"
+( head -n 31 "$OUT_TSV" | column -t -s $'\t' ) 2>/dev/null || head -n 31 "$OUT_TSV"
+
+echo ""
+echo "Done."
+echo "Outputs:"
+echo "  $OUT_TSV"
+echo "  $OUT_CSV"
+echo "  $OUT_NODE_CSV"
+echo "  $OUT_NODE20_CSV"
