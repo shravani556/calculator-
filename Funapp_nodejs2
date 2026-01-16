@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# Configuration
+# =========================
+OUT_CSV="./functionapps-runtime-inventory-final.csv"
+SITES_API_VERSION="2023-12-01"
+
+# =========================
+# Helpers
+# =========================
+norm() { [[ "${1:-}" == "null" || "${1:-}" == "None" ]] && echo "" || echo "${1:-}"; }
+lower() { echo "${1:-}" | tr '[:upper:]' '[:lower:]'; }
+csv()  { printf '"%s"' "${1//\"/\"\"}"; }
+
+command -v az >/dev/null || { echo "Azure CLI not found"; exit 1; }
+az account show >/dev/null || { echo "Run az login first"; exit 1; }
+
+echo "subscription,resourceGroup,functionApp,osType,kind,finalRuntime,finalRuntimeVersion,runtimeSource,runtimeClassification,linuxFxVersion,windowsFxVersion,functionWorkerRuntime,nodeVersion,notes" \
+  > "$OUT_CSV"
+
+# =========================
+# Main
+# =========================
+while read -r SUB; do
+  az account set -s "$SUB"
+
+  az functionapp list --query "[].[name,resourceGroup,id,kind,reserved]" -o tsv |
+  while IFS=$'\t' read -r NAME RG ID KIND RESERVED; do
+
+    OS="Windows"
+    [[ "$RESERVED" == "true" ]] && OS="Linux"
+
+    linuxFx=""
+    windowsFx=""
+    nodeVer=""
+    worker=""
+    notes=""
+    finalRuntime=""
+    finalVersion=""
+    source=""
+    classification=""
+
+    cfg="$(az functionapp config show -g "$RG" -n "$NAME" --query "[linuxFxVersion,windowsFxVersion,nodeVersion]" -o tsv 2>/dev/null || true)"
+    linuxFx="$(norm "$(echo "$cfg" | awk '{print $1}')")"
+    windowsFx="$(norm "$(echo "$cfg" | awk '{print $2}')")"
+    nodeVer="$(norm "$(echo "$cfg" | awk '{print $3}')")"
+
+    worker="$(az functionapp config appsettings list -g "$RG" -n "$NAME" \
+      --query "[?name=='FUNCTIONS_WORKER_RUNTIME'].value | [0]" -o tsv 2>/dev/null || true)"
+    worker="$(norm "$worker")"
+
+    # ---- Flex Consumption (authoritative)
+    flex="$(az resource show --ids "$ID" --api-version "$SITES_API_VERSION" \
+      --query "[properties.functionAppConfig.runtime.name,properties.functionAppConfig.runtime.version]" -o tsv 2>/dev/null || true)"
+
+    if [[ -n "$flex" ]]; then
+      finalRuntime="$(norm "$(echo "$flex" | awk '{print $1}')")"
+      finalVersion="$(norm "$(echo "$flex" | awk '{print $2}')")"
+      source="functionAppConfig.runtime"
+      classification="FlexConsumption"
+
+    # ---- Linux built-in
+    elif [[ -n "$linuxFx" && "$linuxFx" == *"|"* ]]; then
+      finalRuntime="${linuxFx%%|*}"
+      finalVersion="${linuxFx##*|}"
+      source="linuxFxVersion"
+      classification="Explicit"
+
+    # ---- Windows built-in
+    elif [[ -n "$windowsFx" && "$windowsFx" == *"|"* ]]; then
+      finalRuntime="${windowsFx%%|*}"
+      finalVersion="${windowsFx##*|}"
+      source="windowsFxVersion"
+      classification="Explicit"
+
+    # ---- Windows Node fallback
+    elif [[ "$worker" == "node" && -n "$nodeVer" ]]; then
+      finalRuntime="NODE"
+      finalVersion="$nodeVer"
+      source="siteConfig.nodeVersion"
+      classification="Explicit"
+
+    # ---- Container
+    elif [[ "$linuxFx" == DOCKER* ]]; then
+      finalRuntime="ContainerBased"
+      finalVersion="ImageDefined"
+      source="linuxFxVersion"
+      classification="Container"
+      notes="Runtime version inside container image"
+
+    # ---- Legacy / implicit
+    elif [[ -n "$worker" ]]; then
+      finalRuntime="$worker"
+      finalVersion="PlatformDefault"
+      source="FUNCTIONS_WORKER_RUNTIME"
+      classification="Implicit"
+      notes="Runtime not explicitly configured"
+
+    else
+      finalRuntime="Unknown"
+      finalVersion=""
+      classification="Unclassified"
+      notes="No runtime metadata returned by API"
+    fi
+
+    echo "$(csv "$SUB"),$(csv "$RG"),$(csv "$NAME"),$(csv "$OS"),$(csv "$KIND"),$(csv "$finalRuntime"),$(csv "$finalVersion"),$(csv "$source"),$(csv "$classification"),$(csv "$linuxFx"),$(csv "$windowsFx"),$(csv "$worker"),$(csv "$nodeVer"),$(csv "$notes")" \
+      >> "$OUT_CSV"
+
+  done
+done < <(az account list --query "[?state=='Enabled'].id" -o tsv)
+
+echo "✅ Inventory complete: $OUT_CSV"
