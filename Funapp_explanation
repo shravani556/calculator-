@@ -1,3 +1,6 @@
+Although the portal displays Node.js 20 LTS for A00045, the Function App is on Flex Consumption with a platform-managed runtime. The language (Node.js) is explicitly selected, but the runtime version is not persisted as metadata. Therefore, ARM/CLI/scripts correctly return empty version values.”
+
+
 Azure Function App Runtime / Stack Version – Research Summary & Findings
 1. Scope of Investigation
 We analyzed ~560 Azure Function Apps across subscriptions to determine:
