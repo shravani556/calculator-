@@ -1,0 +1,81 @@
+Azure Function App Runtime / Stack Version – Research Summary & Findings
+1. Scope of Investigation
+We analyzed ~560 Azure Function Apps across subscriptions to determine:
+Runtime stack (Node / Python / .NET)
+Runtime version (e.g., Node 20, Python 3.11)
+Why versions appear for some apps but not others
+Whether permissions, portal, or scripting limitations caused missing values
+2. Key Observation
+Only ~10–15 Function Apps show runtime stack versions (e.g., PYTHON|3.11, Node|20, DOTNET|6.0)
+Majority of Function Apps show empty runtime version fields
+All apps are classified as Flex Consumption in runtimeClassification
+This behavior is expected and by design.
+3. Function App Hosting Models & Behavior
+A. Flex Consumption (Microsoft-managed runtime)
+Runtime images are fully managed by Azure
+Customers select only the language, not the exact runtime version
+Azure does not persist runtime version metadata
+No value stored in:
+linuxFxVersion
+windowsFxVersion
+nodeVersion
+Portal “Stack settings” often appears blank or read-only
+✅ Result:
+Scripts, CLI, ARM, and Resource Graph correctly return empty values
+B. Non-Flex (App Service / Premium / Dedicated Consumption)
+Runtime stack and version are explicitly selected
+Azure stores runtime metadata
+Fields populated:
+linuxFxVersion = PYTHON|3.11
+windowsFxVersion = Node|20
+Portal shows runtime version with retirement warnings
+✅ Result:
+Scripts and portal display runtime versions
+4. Why Only Some Flex Apps Show Versions
+Those Function Apps:
+Were explicitly created or later updated via:
+Azure Portal → Configuration → Stack settings
+ARM / Bicep / Terraform with runtime defined
+Azure stored a logical runtime hint
+Metadata persisted even though app is Flex Consumption
+📌 This explains why:
+Only ~15 out of ~560 apps show runtime versions
+Case variations exist (PYTHON|3.11, python|3.11)
+5. Permissions Are NOT the Issue
+Verified with:
+Contributor / Owner access
+Read + Write permissions on site configuration
+Even with full access:
+Runtime version cannot be retrieved if Azure never stored it
+Missing values are not a permission gap
+6. Portal vs Script Behavior Explained
+Scenario
+Portal
+Script
+Explicit runtime selected
+Version visible
+Version returned
+Implicit Flex runtime
+Blank
+Empty
+Microsoft-managed runtime
+Not exposed
+Not retrievable
+📌 Portal screenshot in Jira shows an explicitly configured app, not the default Flex behavior.
+7. Meaning of “Explicitly Configured vs Implicit Runtime”
+Explicit runtime:
+User selects Node/Python/.NET version → Azure stores metadata
+Implicit runtime:
+Azure manages runtime automatically → no metadata persisted
+This is intentional platform design, not a defect.
+8. Script Accuracy Confirmation
+The inventory script:
+Correctly reads:
+linuxFxVersion
+windowsFxVersion
+runtimeClassification
+Correctly shows versions only where Azure has stored them
+Correctly leaves others empty
+✅ Script behavior is accurate and compliant
+9. Final Conclusion
+The absence of runtime version data for most Azure Function Apps is expected for Flex Consumption plans using Microsoft-managed runtimes. Runtime versions are only available when explicitly configured and persisted by Azure. Scripts and portal views correctly reflect this design.
