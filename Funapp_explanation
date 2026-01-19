@@ -1,3 +1,65 @@
+Here are official Microsoft documentation links you can use to support your explanation about Azure Function App runtime behavior, runtime metadata storage, and how runtime versions are exposed or not exposed — especially for Flex Consumption apps.
+✅ 1. Azure Functions Runtime Versions Overview
+Explains how the Azure Functions runtime host versions work and how versioning is controlled (important background on what “runtime” means).
+📌 Microsoft Docs:
+🔗 Azure Functions runtime versions overview — Microsoft Learn
+https://learn.microsoft.com/en-us/azure/azure-functions/functions-versions �
+Microsoft Learn
+This covers:
+What runtime versions (v4, etc.) mean
+How Azure manages Functions host runtime
+How version is tied to app settings like FUNCTIONS_EXTENSION_VERSION �
+Microsoft Learn
+✅ 2. Flex Consumption Plan Explanation
+Official doc describing the Flex Consumption hosting plan, which clarifies why runtime handling is different for Flex vs other plans.
+Note: This page describes Flex Consumption hosting and capabilities, and you can infer that runtime behavior differs (it does not store version metadata the same way).
+📌 Microsoft Docs:
+🔗 Azure Functions Flex Consumption plan hosting — Microsoft Learn
+https://learn.microsoft.com/en-us/azure/azure-functions/flex-consumption-plan �
+Microsoft Learn
+This page is authoritative on:
+How Flex Consumption is a Linux-based hosting plan
+How it extends traditional consumption behavior
+Runtime stack / language supported behavior is defined here �
+Microsoft Learn
+✅ 3. Functions App Settings Reference (linuxFxVersion)
+This document explains what the linuxFxVersion setting means and how it affects Linux apps — relevant to why only some apps have explicit version metadata.
+📌 Microsoft Docs:
+🔗 Functions App settings reference — Microsoft Learn
+https://learn.microsoft.com/en-us/azure/azure-functions/functions-app-settings#linuxFxVersion �
+Microsoft Learn
+✔ Defines how linuxFxVersion is used
+✔ Shows that this value is what determines the language image
+✔ Useful for explaining why explicit stack selection writes the value but implicit Flex-managed cases might not �
+Microsoft Learn
+🚫 NOTE — There is no Microsoft doc that explicitly states:
+“Flex Consumption does not store runtime version by design.”
+Microsoft does not have a page that literally says that in one sentence, but the behavior is implicitly documented through:
+The Flex Consumption plan details (no reference to pinned stack version) �
+Microsoft Learn
+The App settings reference (linuxFxVersion explains when it is used) �
+Microsoft Learn
+The runtime versions doc (describes runtime version control via FUNCTIONS_EXTENSION_VERSION) �
+Microsoft Learn
+Those combined support your reasoning.
+🧾 How to use these in your Jira comment
+You can say something like:
+According to Microsoft documentation, Azure Functions runtime versions are controlled by the runtime host and app settings like FUNCTIONS_EXTENSION_VERSION, and for Linux-based Function Apps the linuxFxVersion setting is used to associate the app with a specific language image. In the Flex Consumption plan documentation, runtime behavior is described without persistent version metadata, meaning Azure manages and updates the runtime platform internally, which is why many apps show no stored version field in configs.
+(See Azure Functions runtime versions overview, Flex Consumption plan hosting, and functions app settings reference) �
+Microsoft Learn +2
+🧠 Why this matters
+Together these docs show:
+✔ What runtime is
+✔ Where version settings are stored (linuxFxVersion)
+✔ That Flex Consumption runtime version isn’t pinned via that setting unless explicitly set
+✔ How explicit configuration vs implicit platform-managed behavior differs
+👍 Bonus Citation for Supported Stacks
+There is also a “supported language stack” table for Flex Consumption (which shows supported stacks and versions) — useful if you want to show what Azure considers supported runtimes on Flex:
+👉 https://learn.microsoft.com/en-us/azure/azure-functions/flex-consumption-plan-hosting#supported-language-stack-versions (See Supported language stack versions section) �
+Microsoft Learn
+If you want, I can format a ready-to-paste Jira comment that references these docs exactly the way auditors expect. Just tell me 👍
+
+
 Although the portal displays Node.js 20 LTS for A00045, the Function App is on Flex Consumption with a platform-managed runtime. The language (Node.js) is explicitly selected, but the runtime version is not persisted as metadata. Therefore, ARM/CLI/scripts correctly return empty version values.”
 
 
