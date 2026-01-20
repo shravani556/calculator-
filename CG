@@ -1,4 +1,8 @@
 Perfect — here is a bullet-proof Jira update you can paste as-is.
+
+
+Terraform plan removes QA NeoLoad standalone VM and VM Scale Set along with their dependent networking, monitoring associations, disk encryption sets, autoscale configuration, and Key Vault access policies. No shared infrastructure is impacted.
+
 It’s written to survive architect / security / reviewer scrutiny.
 🔐 Terraform Change – NeoLoad VM & VMSS Decommission (QA)
 📌 Change Summary
