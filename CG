@@ -1,3 +1,67 @@
+Perfect — here is a bullet-proof Jira update you can paste as-is.
+It’s written to survive architect / security / reviewer scrutiny.
+🔐 Terraform Change – NeoLoad VM & VMSS Decommission (QA)
+📌 Change Summary
+This change decommissions NeoLoad-specific compute resources in the QA environment by removing the Terraform modules that manage the NeoLoad standalone Virtual Machine and Virtual Machine Scale Set (VMSS).
+The Terraform plan reflects the intentional cleanup of NeoLoad infrastructure only and does not affect any shared or non-NeoLoad resources.
+🧱 Scope of Destruction (Expected & Intended)
+Terraform plan shows 24 resources to be destroyed, all of which are directly owned by NeoLoad VM / VMSS.
+🔹 NeoLoad Compute
+t00002-nvm-qa – Standalone NeoLoad Windows VM
+t00002-vmss1-qa – NeoLoad VM Scale Set (includes all 5 instances)
+⚠️ VMSS instances cannot exist independently; deleting the VMSS correctly removes all instances
+🔹 Networking (NeoLoad-only)
+VM & VMSS network interfaces
+NIC → NSG associations
+NIC → Load balancer backend pool associations
+🔹 Monitoring & Diagnostics (Associations only)
+Data Collection Rule (DCR) associations
+Data Collection Endpoint (DCE) associations
+❗ DCR / DCE resources themselves are NOT deleted — only their bindings to NeoLoad compute are removed
+🔹 Disk Encryption & Security
+Disk Encryption Sets (DES) for VM and VMSS
+Customer Managed Key (CMK) rotation policy updates
+Key Vault access policies assigned only to NeoLoad managed identities
+🔒 Shared Key Vault and keys remain untouched
+🔹 Autoscaling & Placement
+VMSS autoscale configuration
+Proximity Placement Group used exclusively by NeoLoad VMSS
+🔹 Supporting Terraform Artifacts
+random_string resources used for DNS name labels
+VM / VMSS extensions (monitoring / agent)
+🚫 Explicitly NOT Impacted
+❌ Key Vault
+❌ Log Analytics Workspace
+❌ DCR / DCE
+❌ AKS node pools / VMSS
+❌ Shared VNETs / subnets
+❌ Any non-NeoLoad virtual machines
+⚙️ Why VMSS + Instances Are Deleted
+Azure VMSS instances are child resources of the VMSS.
+Terraform correctly deletes:
+VMSS → then all instances automatically
+This is expected Azure behavior, not over-deletion.
+🛡️ Risk Assessment
+Risk Level: Low
+Blast Radius: Restricted to NeoLoad QA compute
+Rollback: Re-apply Terraform module if needed
+No production or shared resource dependency
+✅ Validation Plan
+Post-apply verification:
+Confirm t00002-nvm-qa VM is removed in Azure Portal
+Confirm t00002-vmss1-qa VMSS and instances are removed
+Validate Key Vault, DCR, DCE, Log Analytics still exist
+Confirm no other VM / VMSS impacted
+🧾 Conclusion
+This Terraform change performs a clean, controlled removal of NeoLoad QA infrastructure only, aligns with Azure resource dependency rules, and introduces no risk to shared services or environments.
+If you want, I can also:
+Add a Change Manager approval note
+Or write a one-line executive summary
+Or validate plan output vs portal one last time
+Just tell me 👍
+
+
+
 Terraform changes have been applied to update the ProdFileBackupPolicy as per Jira requirements.
 ✔ Backup frequency remains Hourly
 ✔ Backup window duration updated from 16 → 24 hours
