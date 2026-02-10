@@ -1,4 +1,7 @@
-Hi Varadharaj,
+Azure Activity Logs reviewed. Recent events are limited to Azure system actions (SQLVMResourceProviderAuth / Microsoft.Advisor). No user-initiated VM operations observed. Safe to proceed with deletion as per MSAZ-13127.
+
+
+xx E. Hi Varadharaj,
 
 As part of the cleanup activity under JIRA MSAZ-13127, we are reviewing legacy DEV virtual machines for possible decommissioning.
 
