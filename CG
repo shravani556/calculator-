@@ -1,3 +1,19 @@
+Hi Stephen,
+
+As part of the activity tracked under JIRA MSAZ-13127, we are reviewing legacy CTD / SBX / TEST / DEV virtual machines for cleanup.
+
+I have identified the below DEV VMs under the relevant subscription/resource group and would like to confirm whether these are still required or can be decommissioned:
+
+- coredjlnx-dev
+- coredjlnx2-dev
+
+Please let me know if these VMs are still in use or if we can proceed with deletion as part of the cleanup.
+
+Thanks in advance for your confirmation.
+
+Best regards,
+Sravani B
+
 Hi Andrew,
 
 As part of JIRA MSAZ-13127 (“Investigate and delete CTD / SBX / TEST VMs in legacy”), we have identified the following sandbox VM associated with your name:
