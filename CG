@@ -1,3 +1,19 @@
+Hi Andrew,
+
+As part of JIRA MSAZ-13127 (“Investigate and delete CTD / SBX / TEST VMs in legacy”), we have identified the following sandbox VM associated with your name:
+
+- vm-andrewl-sbx
+
+Before proceeding with the deletion, could you please confirm whether this VM is no longer required and can be safely removed?
+
+Once we receive your confirmation, we will proceed accordingly.
+
+Thanks in advance for your support.
+
+Best regards,
+Sravani B
+
+
 Hi Brian, Steve,
 
 As part of JIRA MSAZ-13127 (“Investigate and delete CTD / SBX / TEST VMs in legacy”), we have identified the following two CTD virtual machines for cleanup:
