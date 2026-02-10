@@ -1,3 +1,21 @@
+Hi Varadharaj,
+
+As part of the cleanup activity under JIRA MSAZ-13127, we are reviewing legacy DEV virtual machines for possible decommissioning.
+
+While validating Azure Activity Logs, we noticed a manual restart of the VM initiated by your user ID (pvaradharajsingarave@fi.com), which indicates potential active usage.
+
+Before proceeding further, could you please confirm:
+
+- Whether this VM is still required, or
+- If it can be safely decommissioned as part of the cleanup.
+
+Once we receive your confirmation, we will proceed accordingly.
+
+Thanks for your support.
+
+Best regards,
+Sravani B
+
 Hi Stephen,
 
 As part of the activity tracked under JIRA MSAZ-13127, we are reviewing legacy CTD / SBX / TEST / DEV virtual machines for cleanup.
