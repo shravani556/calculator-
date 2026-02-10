@@ -1,3 +1,20 @@
+Hi Brian, Steve,
+
+As part of JIRA MSAZ-13127 (“Investigate and delete CTD / SBX / TEST VMs in legacy”), we have identified the following two CTD virtual machines for cleanup:
+
+- a00027-gcagg1w3-ctd
+- a00027-gcagg2w3-ctd
+
+Before proceeding with the deletion, we would like to get your confirmation that these VMs are no longer required and can be safely removed.
+
+Please let us know if you approve the deletion or if there are any concerns.
+
+Thanks in advance for your confirmation.
+
+Best regards,
+Sravani B
+
+
 Perfect — here is a bullet-proof Jira update you can paste as-is.
 
 
