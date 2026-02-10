@@ -1,3 +1,8 @@
+Identified that some of the listed resources are Terraform-managed.
+Currently working on required Terraform code changes to handle these resources correctly.
+Cleanup/deletion will be performed via Terraform once the code updates are completed and validated.
+Marking this item as in progress for now.
+
 Azure Activity Logs reviewed for resource a14virtsbx. Recent events are limited to Microsoft.Advisor recommendations only. No user-initiated or compute operations observed. Resource appears inactive and is safe for cleanup.
 Azure Activity Logs reviewed. Recent events are limited to Azure system actions (SQLVMResourceProviderAuth / Microsoft.Advisor). No user-initiated VM operations observed. Safe to proceed with deletion as per MSAZ-13127.
 
