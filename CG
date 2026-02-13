@@ -1,3 +1,12 @@
+Subject
+Follow-up: Confirmation Required to Delete VMs | MSAZ-13127
+Hi Stephen,
+Just following up on the below request regarding the DEV VMs (coredjinx-dev and coredjinx2-dev) under Jira MSAZ-13127.
+Could you please confirm whether these VMs are still required or if we can proceed with deletion as part of the cleanup activity?
+Appreciate your response.
+Thank you,
+Sravani B
+
 Hi Bill and Liam,
 
 We have observed no activity on VM a14virtsbx (SUB-TBS-SBX | West US) for the past three months.
