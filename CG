@@ -1,5 +1,16 @@
 Hi Bill and Liam,
 
+We have observed no activity on VM a14virtsbx (SUB-TBS-SBX | West US) for the past three months.
+
+This is an informational request to please review the VM and confirm if it is still required. If not needed, kindly proceed with deletion.
+
+Thank you.
+
+Regards,
+Sravani B
+
+Hi Bill and Liam,
+
 As part of the ongoing cleanup review under Jira MSAZ-13127, we observed that the VM a14virtsbx (SUB-TBS-SBX | West US) has not shown any activity over the past three months.
 
 This is an informational note requesting your review of the VM. Kindly confirm whether the resource is still required. If it is no longer needed, please proceed with deletion as appropriate.
