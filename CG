@@ -1,3 +1,25 @@
+Subject
+Follow-Up: Confirmation Required for TestVM1 Deletion | MSAZ-13127
+Hi @Stephen McCreary / Team,
+This is a follow-up regarding the below request for TestVM1 in SUB-COREMGMT-QA (West US 3).
+Kindly confirm whether the resource is required or if we can proceed with the cleanup. Awaiting your response to take further action.
+Thank you.
+Regards,
+Sravani B
+
+Follow-Up: Please Remove VM a14virtsbx
+
+Hi @Bill Craver / @Liam Leahy,
+
+This is a follow-up regarding VM a14virtsbx (RG: a00014-namespace-sbx).
+
+There has been no activity in the last 3 months. Kindly review and remove the VM from your end if it is no longer required.
+
+Thank you.
+
+Regards,
+Sravani B
+
 Perfect 👍 I’ll give you a clean Jira update including:
 Separate pipelines created for Key Vault
 Separate pipelines created for Virtual Machine
