@@ -1,3 +1,79 @@
+Perfect 👍 I’ll give you a clean Jira update including:
+Separate pipelines created for Key Vault
+Separate pipelines created for Virtual Machine
+Network destroy attempt
+Error faced
+Current status
+You can paste this directly into Jira.
+✅ Jira Update – CTD Infrastructure Pipeline Segregation & Destroy Activity
+🔹 Summary
+Separated infrastructure deployments into individual GitHub Actions pipelines for better control and independent lifecycle management of:
+Virtual Machine
+Key Vault
+Network
+Workload
+Additionally attempted CTD Network destroy activity.
+🔹 Pipelines Created / Updated
+The following dedicated pipelines were implemented:
+1️⃣ Virtual Machine
+t00002 CTD virtual_machine Deployment
+t00002 CTD virtual_machine Destroy
+Purpose:
+Enables independent VM creation and deletion
+Prevents impact on Network and Key Vault resources
+2️⃣ Key Vault
+t00002 CTD Keyvault Deployment
+(Destroy capability prepared via workflow modification)
+Purpose:
+Allows isolated Key Vault lifecycle management
+Avoids dependency conflicts with network layer
+3️⃣ Network
+t00002 CTD Network Deployment
+Modified workflow to support destroy execution
+Purpose:
+Dedicated control over:
+VNet
+Subnets
+NSG
+Route tables
+Network associations
+🔹 Destroy Activity Performed
+Updated t00002_ctd_network_destroy.yml
+Replaced:
+Copy code
+
+terraform apply -auto-approve
+with:
+Copy code
+
+terraform destroy -auto-approve
+Triggered pipeline execution
+🔴 Error Encountered During Destroy
+Terraform failed during refresh phase:
+Copy code
+
+Error: Virtual Hub (Name "core-vhub02-dev" / Resource Group "core-netwrk-dev") was not found
+Location:
+Copy code
+
+modules/Terraform_Azure_Network/Application_Virtual_Network/data.tf
+data "azurerm_virtual_hub" "hub_third"
+🔎 Root Cause
+Network module references an external Azure Virtual Hub via data block.
+Referenced hub does not exist in Azure.
+Terraform attempts to read data sources during plan/destroy.
+Missing resource causes pipeline failure before destroy execution.
+🔹 Impact
+No infrastructure resources were deleted.
+Terraform state remains unchanged.
+Destroy operation blocked due to missing external dependency.
+🔹 Next Steps
+Validate whether Virtual Hub is required for CTD environment.
+If not required:
+Temporarily disable or conditionally control azurerm_virtual_hub data block.
+Re-run network destroy pipeline after correction.
+
+
 An informational email has been sent to the respective application owner regarding TestVM1, as no recent activity has been observed.
 Awaiting confirmation on whether the VM is still required or can be deleted.
 
