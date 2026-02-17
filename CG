@@ -1,3 +1,22 @@
+Issue Explanation
+
+The pipeline is failing at the "Get SPN KV Secrets" step because the secrets t00010-namespaceapp-secret and t00010-namespaceapp-id do not exist in the Azure Key Vault . This is confirmed by your manual verification in the Azure portal.
+
+The GitHub Action Azure/get-keyvault-secrets@v1 attempts to download these secrets but fails because they cannot be found . This is a configuration issue, not a permission or network problem.
+
+Resolution Steps
+
+1. Create the missing secrets in Azure Key Vault
+
+Option A: Using Azure Portal
+
+1. Navigate to your Key Vault in the Azure portal
+2. Go to "Secrets" under the "Objects" section
+3. Click "+ Generate/Import" to create each secret:
+   · Name: t00010-namespaceapp-secret (with the appropriate value)
+   · Name: t00010-namespaceapp-id (with the appropriate value)
+
+
 Issue: Pipeline failing with Error: No value for required variable "vm_config"
 
 Root Cause:
