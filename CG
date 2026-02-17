@@ -1,3 +1,6 @@
+The t00002 CTD Network Destroy plan pipeline fails at terraform validate due to multiple "Unsupported block type" and "Unsupported argument" errors in the network module. Root cause is a provider version mismatch: the module uses syntax from an older AzureRM provider (v2.x), but the pipeline now uses v3.x. To resolve, we must either update the module code (e.g., replace log blocks with enabled_log in diagnostic settings, update subnet arguments) or temporarily pin the provider to ~> 2.99 in versions.tf. We recommend updating the module for long-term compatibility. The team will implement and test the changes.
+
+
 Issue Explanation
 
 The pipeline is failing at the "Get SPN KV Secrets" step because the secrets t00010-namespaceapp-secret and t00010-namespaceapp-id do not exist in the Azure Key Vault . This is confirmed by your manual verification in the Azure portal.
