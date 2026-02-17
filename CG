@@ -1,3 +1,18 @@
+Issue: Pipeline failing with Error: No value for required variable "vm_config"
+
+Root Cause:
+The variable vm_config is required but was not provided in the ctd.tfvars file. Attempts to comment out lines used invalid syntax (+#), which prevented the variable from being set.
+
+Resolution:
+
+1. Corrected the syntax in ctd.tfvars by replacing the invalid +# lines with proper # comments.
+2. Added vm_config = {} to satisfy the required variable without creating any djoin VMs (since they are not needed in this environment).
+3. Verified that the pipeline now runs successfully.
+
+Next Steps:
+To delete the guardicore VMs (guardicore_agg_01 and guardicore_agg_02) from the ctd environment, we will implement conditional count in the module definitions and apply the change. This ensures they are removed only from ctd without affecting other environments.
+
+
 Subject
 Follow-Up: Confirmation Required for TestVM1 Deletion | MSAZ-13127
 Hi @Stephen McCreary / Team,
