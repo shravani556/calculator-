@@ -1,3 +1,56 @@
+Looking at these new screenshots, you now have a separate destroy plan focused on Key Vaults. The portal screenshot you shared earlier showed 3 Key Vaults, and this destroy plan is targeting exactly those.
+
+The 8 Resources Being Destroyed (Key Vault Plan):
+
+Key Vaults (3)
+
+1. module.key_vault_commonkv.azurerm_key_vault.kv - t00002-commonkv1-ctd
+2. module.key_vault_servicekv.azurerm_key_vault.kv - t00002-servicekv1-ctd
+3. module.key_vault_servicev2.azurerm_key_vault.kv - t00002-servicekv2-ctd
+
+Diagnostic Settings for Key Vaults (3)
+
+1. module.key_vault_commonkv.azurerm_monitor_diagnostic_setting.diagnostics - commonkv1
+2. module.key_vault_servicekv.azurerm_monitor_diagnostic_setting.diagnostics - servicekv1
+3. module.key_vault_servicev2.azurerm_monitor_diagnostic_setting.diagnostics - servicekv2
+
+Access Policies (2)
+
+1. module.namespace_sp_key_vault_access_policy["common_vault_wus3"].azurerm_key_vault_access_policy.access_wus3 - for commonkv1
+2. module.namespace_sp_key_vault_access_policy["services_vault_wus3"].azurerm_key_vault_access_policy.access_policy_created - for servicekv1
+
+Why 8? The Breakdown:
+
+Component Count Details
+Key Vaults 3 The actual vault resources
+Diagnostic Settings 3 Each vault has monitoring config
+Access Policies 2 Service principal access policies
+TOTAL 8 
+
+Are these in the Portal?
+
+YES - Looking at your portal screenshot (68908.jpg), these match exactly:
+
+· ✅ t00002-commonkv1-ctd (Key Vault)
+· ✅ t00002-servicekv1-ctd (Key Vault)
+· ✅ t00002-servicekv2-ctd (Key Vault)
+
+What's Interesting:
+
+1. Missing Access Policy: Only 2 access policies are being destroyed, but there are 3 Key Vaults. servicekv2 has no access policy being destroyed (it might not have one configured).
+2. Diagnostic Settings: All 3 vaults have diagnostic settings sending logs to Event Hub (t00001-evhnsappw3-dev1)
+3. Sensitive Outputs: The plan shows sensitive outputs will change:
+   · common_key_vault_obj
+   · services2_key_vault_obj
+   · services_key_vault_obj
+
+Summary:
+
+This is a separate destroy operation from your first one (which destroyed networking components). This one targets the 3 Key Vaults shown in your portal, plus their monitoring configurations and access policies - totaling 8 resources.
+
+The destroy plan confirms exactly what's in your portal: all 3 Key Vaults are being destroyed, along with their associated configurations.
+
+
 Looking at the destroy plan across all the screenshots, I can identify exactly 19 resources being destroyed. Here's the breakdown:
 
 The 19 Resources Being Destroyed:
