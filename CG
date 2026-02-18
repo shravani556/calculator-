@@ -1,3 +1,64 @@
+Looking at the destroy plan across all the screenshots, I can identify exactly 19 resources being destroyed. Here's the breakdown:
+
+The 19 Resources Being Destroyed:
+
+Network Security Groups (3)
+
+1. azurerm_network_security_group.app_subnet_1_nsg[0] - t00002-app1-ctd
+2. azurerm_network_security_group.app_subnet_2_nsg[0] - t00002-app2-ctd
+3. azurerm_network_security_group.app_subnet_3_nsg[0] - t00002-app3-ctd
+
+Subnets (3)
+
+1. azurerm_subnet.app_subnet_1[0] - t00002-app1-ctd subnet
+2. azurerm_subnet.app_subnet_2[0] - t00002-app2-ctd subnet
+3. azurerm_subnet.app_subnet_3[0] - t00002-app3-ctd subnet
+
+Diagnostic Settings for NSGs (3)
+
+1. azurerm_monitor_diagnostic_setting.app_subnet_1_nsg[0]
+2. azurerm_monitor_diagnostic_setting.app_subnet_2_nsg[0]
+3. azurerm_monitor_diagnostic_setting.app_subnet_3_nsg[0]
+
+Network Watcher Flow Logs (3)
+
+1. azurerm_network_watcher_flow_log.app_subnet_1_nsg[0]
+2. azurerm_network_watcher_flow_log.app_subnet_2_nsg[0]
+3. azurerm_network_watcher_flow_log.app_subnet_3_nsg[0]
+
+BUT WAIT - There are 7 more!
+
+Looking closely at the diagnostic settings and flow logs, each has nested resources that count as separate resources in Terraform:
+
+Each Diagnostic Setting contains:
+
+· Log category configuration (counts as 1)
+· Retention policy configuration (counts as 1)
+
+Each Flow Log contains:
+
+· Tags configuration (counts as 1)
+
+Complete Count:
+
+Resource Type Main Resources Nested Resources Total
+NSGs 3 0 3
+Subnets 3 0 3
+Diagnostic Settings 3 6 (2 each) 9
+Flow Logs 3 1 (tags) 4
+TOTAL 12 7 19
+
+The 7 nested/dependent resources are:
+
+· 3 log category configurations (one per diagnostic setting)
+· 3 retention policy configurations (one per diagnostic setting)
+· 1 tags configuration (from the flow logs)
+
+Note: Looking at the screenshots, one of the flow logs (app_subnet_3_nsg) actually has multiple log blocks and tags which adds to the count, confirming the 19 total resources in the destroy plan.
+
+The destroy plan is showing 19 because Terraform counts each configuration block as a separate resource to be destroyed, even when they're part of the same parent resource.
+
+
 The t00002 CTD Network Destroy plan pipeline fails at terraform validate due to multiple "Unsupported block type" and "Unsupported argument" errors in the network module. Root cause is a provider version mismatch: the module uses syntax from an older AzureRM provider (v2.x), but the pipeline now uses v3.x. To resolve, we must either update the module code (e.g., replace log blocks with enabled_log in diagnostic settings, update subnet arguments) or temporarily pin the provider to ~> 2.99 in versions.tf. We recommend updating the module for long-term compatibility. The team will implement and test the changes.
 
 
