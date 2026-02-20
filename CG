@@ -1,3 +1,140 @@
+#!/usr/bin/env bash
+# save as: ctd_import_missing.sh
+# run: bash ctd_import_missing.sh
+# Purpose: Fetch IDs in Azure (Cloud Shell) and import the 10 missing resources into Terraform state.
+
+set -euo pipefail
+
+# ------------------ EDIT ONLY IF NAMES DIFFER ------------------
+TFVARS="./environments/ctd/ctd.tfvars"
+
+RG="t00002-namespace-ctd"
+VNET="t00002-network-ctd"
+LOC="westus3"
+
+SUBNET1="t00002-app1-ctd"
+SUBNET2="t00002-app2-ctd"
+SUBNET3="t00002-app3-ctd"
+
+NSG1="t00002-app1nsg-ctd"
+NSG2="t00002-app2nsg-ctd"
+NSG3="t00002-app3nsg-ctd"
+
+# Virtual Hub info (must fill before running hub connection import)
+# You can set these as environment variables instead of editing the file:
+#   export VHUB_RG="..."
+#   export VHUB_NAME="..."
+VHUB_RG="${VHUB_RG:-}"
+VHUB_NAME="${VHUB_NAME:-}"
+# ----------------------------------------------------------------
+
+log() { printf "\n\033[1m%s\033[0m\n" "$*"; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found in PATH"; exit 1; }
+}
+
+need az
+need terraform
+
+log "Azure account"
+az account show -o table >/dev/null || { echo "ERROR: Not logged in to Azure. In Cloud Shell you should already be logged in."; exit 1; }
+az account show -o table
+
+log "Terraform init"
+terraform init -input=false
+
+log "Fetch Subnet IDs"
+SUBNET1_ID=$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$SUBNET1" --query id -o tsv)
+SUBNET2_ID=$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$SUBNET2" --query id -o tsv)
+SUBNET3_ID=$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$SUBNET3" --query id -o tsv)
+
+log "Fetch NSG IDs"
+NSG1_ID=$(az network nsg show -g "$RG" -n "$NSG1" --query id -o tsv)
+NSG2_ID=$(az network nsg show -g "$RG" -n "$NSG2" --query id -o tsv)
+NSG3_ID=$(az network nsg show -g "$RG" -n "$NSG3" --query id -o tsv)
+
+echo "SUBNET1_ID=$SUBNET1_ID"
+echo "NSG1_ID=$NSG1_ID"
+
+log "Fetch Diagnostic Setting Names on each NSG (first one found)"
+DIAG1_NAME=$(az monitor diagnostic-settings list --resource "$NSG1_ID" --query "[0].name" -o tsv || true)
+DIAG2_NAME=$(az monitor diagnostic-settings list --resource "$NSG2_ID" --query "[0].name" -o tsv || true)
+DIAG3_NAME=$(az monitor diagnostic-settings list --resource "$NSG3_ID" --query "[0].name" -o tsv || true)
+
+echo "DIAG1_NAME=${DIAG1_NAME:-<none>}"
+echo "DIAG2_NAME=${DIAG2_NAME:-<none>}"
+echo "DIAG3_NAME=${DIAG3_NAME:-<none>}"
+
+log "Fetch Flow Log IDs (location: $LOC)"
+# Show what exists (for transparency)
+az network watcher flow-log list --location "$LOC" --query "[?contains(name,'t00002')].{name:name,id:id}" -o table || true
+
+FLOWLOG1_ID=$(az network watcher flow-log list --location "$LOC" --query "[?contains(name,'app1')].id | [0]" -o tsv || true)
+FLOWLOG2_ID=$(az network watcher flow-log list --location "$LOC" --query "[?contains(name,'app2')].id | [0]" -o tsv || true)
+FLOWLOG3_ID=$(az network watcher flow-log list --location "$LOC" --query "[?contains(name,'app3')].id | [0]" -o tsv || true)
+
+echo "FLOWLOG1_ID=${FLOWLOG1_ID:-<none>}"
+echo "FLOWLOG2_ID=${FLOWLOG2_ID:-<none>}"
+echo "FLOWLOG3_ID=${FLOWLOG3_ID:-<none>}"
+
+log "Fetch Virtual Hub Connection ID (optional)"
+HUBCONN_ID=""
+if [[ -n "$VHUB_RG" && -n "$VHUB_NAME" ]]; then
+  az network vhub connection list -g "$VHUB_RG" --vhub-name "$VHUB_NAME" \
+    --query "[].{name:name,id:id}" -o table || true
+  HUBCONN_ID=$(az network vhub connection list -g "$VHUB_RG" --vhub-name "$VHUB_NAME" \
+    --query "[?contains(name,'t00002')].id | [0]" -o tsv || true)
+  echo "HUBCONN_ID=${HUBCONN_ID:-<none>}"
+else
+  echo "VHUB_RG/VHUB_NAME not set -> skipping hub connection import."
+  echo "Set and rerun only hub import, e.g.:"
+  echo "  export VHUB_RG='<hub-rg>'"
+  echo "  export VHUB_NAME='<hub-name>'"
+fi
+
+tf_import() {
+  local addr="$1"
+  local id="$2"
+  if [[ -z "$id" || "$id" == "<none>" ]]; then
+    echo "SKIP (missing ID): $addr"
+    return 0
+  fi
+  echo "IMPORT: $addr"
+  terraform import -var-file="$TFVARS" "$addr" "$id"
+}
+
+log "IMPORT 3x Subnet->NSG Associations"
+tf_import "module.vnet.azurerm_subnet_network_security_group_association.app_subnet_1_nsg_association[0]" "${SUBNET1_ID}|${NSG1_ID}"
+tf_import "module.vnet.azurerm_subnet_network_security_group_association.app_subnet_2_nsg_association[0]" "${SUBNET2_ID}|${NSG2_ID}"
+tf_import "module.vnet.azurerm_subnet_network_security_group_association.app_subnet_3_nsg_association[0]" "${SUBNET3_ID}|${NSG3_ID}"
+
+log "IMPORT 3x NSG Diagnostic Settings"
+# If DIAG*_NAME is empty, it means diagnostic settings don't exist in Azure -> skip.
+[[ -n "${DIAG1_NAME:-}" ]] && tf_import "module.vnet.azurerm_monitor_diagnostic_setting.app_subnet_1_nsg[0]" "${NSG1_ID}|${DIAG1_NAME}" || echo "SKIP diag1 (no diagnostic setting found)"
+[[ -n "${DIAG2_NAME:-}" ]] && tf_import "module.vnet.azurerm_monitor_diagnostic_setting.app_subnet_2_nsg[0]" "${NSG2_ID}|${DIAG2_NAME}" || echo "SKIP diag2 (no diagnostic setting found)"
+[[ -n "${DIAG3_NAME:-}" ]] && tf_import "module.vnet.azurerm_monitor_diagnostic_setting.app_subnet_3_nsg[0]" "${NSG3_ID}|${DIAG3_NAME}" || echo "SKIP diag3 (no diagnostic setting found)"
+
+log "IMPORT 3x Flow Logs"
+[[ -n "${FLOWLOG1_ID:-}" ]] && tf_import "module.vnet.azurerm_network_watcher_flow_log.app_subnet_1_nsg[0]" "${FLOWLOG1_ID}" || echo "SKIP flowlog1 (not found)"
+[[ -n "${FLOWLOG2_ID:-}" ]] && tf_import "module.vnet.azurerm_network_watcher_flow_log.app_subnet_2_nsg[0]" "${FLOWLOG2_ID}" || echo "SKIP flowlog2 (not found)"
+[[ -n "${FLOWLOG3_ID:-}" ]] && tf_import "module.vnet.azurerm_network_watcher_flow_log.app_subnet_3_nsg[0]" "${FLOWLOG3_ID}" || echo "SKIP flowlog3 (not found)"
+
+log "IMPORT 1x Virtual Hub Connection"
+if [[ -n "${HUBCONN_ID:-}" ]]; then
+  tf_import "module.vnet.azurerm_virtual_hub_connection.hub_connection" "${HUBCONN_ID}"
+else
+  echo "SKIP hub connection (HUBCONN_ID not found / not set)."
+fi
+
+log "Post-check: what was added to state"
+terraform state list | grep -E "subnet_network_security_group_association|monitor_diagnostic_setting|network_watcher_flow_log|virtual_hub_connection" || true
+
+log "Next command (to verify destroy includes these too)"
+echo "terraform plan -destroy -var-file=\"$TFVARS\""
+
+
+
 - name: Debug Terraform State
   run: |
     terraform init -input=false
