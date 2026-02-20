@@ -1,3 +1,19 @@
+- name: Debug Terraform State
+  run: |
+    terraform init -input=false
+    echo "===== FULL STATE ====="
+    terraform state list
+    echo "===== DIAGNOSTICS ====="
+    terraform state list | grep monitor_diagnostic_setting || true
+    echo "===== ASSOCIATIONS ====="
+    terraform state list | grep subnet_network_security_group_association || true
+    echo "===== FLOW LOGS ====="
+    terraform state list | grep network_watcher_flow_log || true
+    echo "===== HUB CONNECTION ====="
+    terraform state list | grep virtual_hub_connection || true
+
+
+
 Looking at these new screenshots, you now have a separate destroy plan focused on Key Vaults. The portal screenshot you shared earlier showed 3 Key Vaults, and this destroy plan is targeting exactly those.
 
 The 8 Resources Being Destroyed (Key Vault Plan):
