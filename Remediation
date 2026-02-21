@@ -1,3 +1,16 @@
+- name: Ensure Terraform Destroy Plan (ONLY)
+  id: terraform_plan
+  run: |
+    printf "\nJOB STATUS: TARGET DESTROY PLAN NOW STARTING\n--------------------------------------------\n"
+    terraform plan -destroy \
+      -var-file="./environments/ctd/ctd_eus.tfvars" \
+      -var "local_account=${{ steps.kvsecrets.outputs.vm-local-account }}" \
+      -var "keyvault_domain_token=${{ steps.kvsecrets.outputs.domain-secret }}" \
+      -var "domain_svc_account=${{ steps.kvsecrets.outputs.domain-svc-account }}" \
+      -var "local_account_cred=${{ steps.kvsecrets.outputs.vm-local-account-cred }}" \
+      -target='module.octopus-vm-linux1["vm1"]'
+
+
 - name: Find state address for t000101nxectd
   run: |
     echo "Searching state for VM name t000101nxectd..."
