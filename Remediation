@@ -1,3 +1,20 @@
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_network_security_group.app_subnet_2_nsg[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/networkSecurityGroups/t00002-app2nsg-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_network_security_group.app_subnet_3_nsg[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/networkSecurityGroups/t00002-app3nsg-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_subnet.app_subnet_1[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/virtualNetworks/t00002-network-ctd/subnets/t00002-app1-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_subnet.app_subnet_2[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/virtualNetworks/t00002-network-ctd/subnets/t00002-app2-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_subnet.app_subnet_3[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/virtualNetworks/t00002-network-ctd/subnets/t00002-app3-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_subnet.private_endpoint_subnet" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/virtualNetworks/t00002-network-ctd/subnets/t00002-privendnet-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_virtual_network.vnet" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/virtualNetworks/t00002-network-ctd"
+
+terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.time_sleep.wait_60_seconds" "2022-10-28T20:26:31Z"
+
+
 1) Azure Function Apps – Enable authentication on API endpoints
 * Authentication & authorization in App Service / Azure Functions (Easy Auth overview) https://learn.microsoft.com/en-us/azure/app-service/overview-authentication-authorization?utm_source=chatgpt.com
 * Configure Microsoft Entra ID (Azure AD) authentication for App Service / Azure Functions https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-provider-aad?utm_source=chatgpt.com
