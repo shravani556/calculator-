@@ -1,3 +1,11 @@
+- name: Find state address for t000101nxectd
+  run: |
+    echo "Searching state for VM name t000101nxectd..."
+    terraform state list | grep -i "t000101nxectd" || true
+
+    echo "Searching state for octopus-vm-linux1 module instances..."
+    terraform state list | grep -E 'module\.octopus-vm-linux1' || true
+
 terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_network_security_group.app_subnet_2_nsg[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/networkSecurityGroups/t00002-app2nsg-ctd"
 
 terraform import -var-file="./environments/ctd/ctd.tfvars" "module.vnet.azurerm_network_security_group.app_subnet_3_nsg[0]" "/subscriptions/SUBSCRIPTION_ID_HERE/resourceGroups/t00002-namespace-ctd/providers/Microsoft.Network/networkSecurityGroups/t00002-app3nsg-ctd"
