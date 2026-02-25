@@ -1,3 +1,24 @@
+✅ Jira Comment (Professional + Clear)
+After reviewing the pipeline failures in both main and feature branches, we identified multiple blocking issues:
+Expired client secret for App ID 3eabd38c-debc-451a-8d2b-4dd121fb4daf.
+The corresponding App Registration is no longer available, so we cannot rotate or regenerate a new secret.
+Provider configuration not present errors for azapi resources (orphaned state entries).
+These resources exist in the Terraform state but the provider configuration has already been removed from the code, preventing destroy operations through Terraform.
+State inconsistency issues and module output reference errors are blocking Terraform from completing plan/destroy successfully.
+Since Terraform cannot authenticate (due to expired secret) and cannot safely reconcile orphaned resources (due to missing provider configuration), automated cleanup is currently not feasible.
+To unblock CTD cleanup and avoid further state corruption, I recommend proceeding with manual deletion of the impacted resources in Azure.
+Once manual deletion is completed, we can:
+Clean up the corresponding entries from Terraform state (if required)
+Re-align provider configuration
+Stabilize the pipeline
+Please confirm if we can proceed with manual deletion of the impacted CTD resources.
+🔥 Shorter Version (If You Want More Direct)
+Due to expired SP credentials and orphaned azapi provider resources in state, Terraform destroy cannot proceed.
+App registration is missing, so secret rotation is not possible.
+Recommend manual deletion of CTD resources to unblock pipeline and state reconciliation.
+Please confirm approval to proceed.
+
+
 - name: Ensure Terraform Destroy Plan (ONLY)
   id: terraform_plan
   run: |
