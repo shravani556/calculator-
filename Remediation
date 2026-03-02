@@ -1,3 +1,9 @@
+You can say:
+Destroy partially completed. Remaining 2 Key Vaults and 1 Storage Account are blocked due to Key Vault firewall restriction (403 ForbiddenByFirewall). Awaiting network access update or proceeding with state cleanup workaround.
+
+
+
+
 ✅ Jira Comment (Professional + Clear)
 After reviewing the pipeline failures in both main and feature branches, we identified multiple blocking issues:
 Expired client secret for App ID 3eabd38c-debc-451a-8d2b-4dd121fb4daf.
