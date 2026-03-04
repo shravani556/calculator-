@@ -1,3 +1,19 @@
+- name: Remove resources from Terraform state
+  id: terraform_state_cleanup
+  working-directory: nasuni
+  run: |
+  terraform state rm module.general_storage.azurerm_storage_account.stoacc
+  terraform state rm module.general_storage.module.storage_account_cmk[0].azurerm_key_vault_access_policy.storage_policy
+  terraform state rm module.general_storage.module.storage_account_cmk[0].azurerm_key_vault_key.cmk
+  terraform state rm module.namespace_sp_key_vault_access_policy["common_vault"].azurerm_key_vault_access_policy.access
+  terraform state rm module.namespace_sp_key_vault_access_policy["services_vault"].azurerm_key_vault_access_policy.access
+  terraform state rm module.key_vault["commonkv1"].azurerm_key_vault.kv
+  terraform state rm module.key_vault["servicekv1"].azurerm_key_vault.kv
+
+
+
+
+
 You can say:
 Destroy partially completed. Remaining 2 Key Vaults and 1 Storage Account are blocked due to Key Vault firewall restriction (403 ForbiddenByFirewall). Awaiting network access update or proceeding with state cleanup workaround.
 
