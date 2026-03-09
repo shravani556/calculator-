@@ -1,0 +1,164 @@
+cat > az_region_inventory.sh <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOCATION="centralus"
+OUTDIR="."
+SUBS_MODE="current"   # current | all | list
+SUB_LIST=""
+
+usage() {
+  cat <<'EOF'
+Usage: az_region_inventory.sh [options]
+
+Creates a review spreadsheet (CSV) of every Azure resource in a given region.
+
+Options:
+  -l, --location <loc>     Azure location (default: centralus)
+  -o, --outdir <dir>       Output directory (default: .)
+  -a, --all-subs           Scan all enabled subscriptions you can access
+  -s, --subs <id1,id2,..>  Scan only these subscription IDs (comma-separated)
+  -h, --help               Show help
+
+Examples:
+  ./az_region_inventory.sh -l centralus
+  ./az_region_inventory.sh -l centralus -a
+  ./az_region_inventory.sh -l centralus -s "00000000-0000-0000-0000-000000000000,11111111-1111-1111-1111-111111111111"
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -l|--location)
+      LOCATION="${2:-}"; shift 2 ;;
+    -o|--outdir)
+      OUTDIR="${2:-}"; shift 2 ;;
+    -a|--all-subs)
+      SUBS_MODE="all"; shift ;;
+    -s|--subs)
+      SUBS_MODE="list"; SUB_LIST="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1 ;;
+  esac
+done
+
+# ---- prereqs ----
+command -v az >/dev/null 2>&1 || { echo "ERROR: Azure CLI (az) not found." >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq not found." >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found." >&2; exit 1; }
+
+mkdir -p "$OUTDIR"
+
+TS="$(date -u +"%Y%m%dT%H%M%SZ")"
+SAFE_LOC="$(echo "$LOCATION" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')"
+INV_CSV="$OUTDIR/${SAFE_LOC}_resource_inventory_${TS}.csv"
+TYPE_SUMMARY_CSV="$OUTDIR/${SAFE_LOC}_resource_type_summary_${TS}.csv"
+RG_SUMMARY_CSV="$OUTDIR/${SAFE_LOC}_resourcegroup_summary_${TS}.csv"
+
+# ---- subscription selection ----
+declare -a SUB_IDS=()
+if [[ "$SUBS_MODE" == "current" ]]; then
+  SUB_IDS=("$(az account show --query id -o tsv)")
+elif [[ "$SUBS_MODE" == "list" ]]; then
+  IFS=',' read -r -a SUB_IDS <<< "$SUB_LIST"
+else
+  mapfile -t SUB_IDS < <(az account list --query "[?state=='Enabled'].id" -o tsv)
+fi
+
+# Build a subscriptionId -> name map (best-effort)
+declare -A SUB_NAME=()
+while IFS=$'\t' read -r sid sname; do
+  SUB_NAME["$sid"]="$sname"
+done < <(az account list --query "[?state=='Enabled'].[id,name]" -o tsv)
+
+# ---- write inventory header ----
+cat > "$INV_CSV" <<'CSV'
+SubscriptionName,SubscriptionId,ResourceGroup,Name,Type,Location,Kind,Sku,ProvisioningState,Tags,Id,PortalUrl,Decision,Owner,Application,Environment,Notes
+CSV
+
+TOTAL=0
+
+for sid in "${SUB_IDS[@]}"; do
+  sid="$(echo "$sid" | xargs)"   # trim
+  [[ -z "$sid" ]] && continue
+
+  sname="${SUB_NAME[$sid]:-$sid}"
+  echo "==> Scanning subscription: $sname ($sid)" >&2
+
+  # Note: az resource list returns ALL resources; filtering is done client-side by jq.
+  json="$(az resource list --subscription "$sid" -o json)"
+
+  # Append matching resources (case-insensitive, ignores whitespace)
+  echo "$json" | jq --arg loc "$LOCATION" --arg sid "$sid" --arg sname "$sname" -r '
+    def norm: ascii_downcase | gsub("\\s+";"");
+    .[]
+    | select((.location // "" | norm) == ($loc | norm))
+    | [
+        $sname,
+        $sid,
+        (.resourceGroup // ""),
+        (.name // ""),
+        (.type // ""),
+        (.location // ""),
+        (.kind // ""),
+        (.sku.name // ""),
+        (.properties.provisioningState // ""),
+        ((.tags // {}) | @json),
+        (.id // ""),
+        ("https://portal.azure.com/#resource" + (.id // "")),
+        "", "", "", "", ""
+      ] | @csv
+  ' >> "$INV_CSV"
+
+  c="$(echo "$json" | jq --arg loc "$LOCATION" -r '
+    def norm: ascii_downcase | gsub("\\s+";"");
+    [ .[] | select((.location // "" | norm) == ($loc | norm)) ] | length
+  ')"
+  TOTAL=$((TOTAL + c))
+done
+
+# ---- summaries (robust CSV parsing via Python) ----
+python3 - "$INV_CSV" "$TYPE_SUMMARY_CSV" "$RG_SUMMARY_CSV" <<'PY'
+import csv, collections, sys
+inv, out_type, out_rg = sys.argv[1], sys.argv[2], sys.argv[3]
+
+by_type = collections.Counter()
+by_rg = collections.Counter()
+
+with open(inv, newline='', encoding='utf-8') as f:
+    r = csv.DictReader(f)
+    for row in r:
+        by_type[row.get('Type','')] += 1
+        rg_key = f"{row.get('SubscriptionName','')}::{row.get('ResourceGroup','')}"
+        by_rg[rg_key] += 1
+
+with open(out_type, 'w', newline='', encoding='utf-8') as f:
+    w = csv.writer(f)
+    w.writerow(['Type','Count'])
+    for t,c in sorted(by_type.items(), key=lambda x: (-x[1], x[0])):
+        w.writerow([t,c])
+
+with open(out_rg, 'w', newline='', encoding='utf-8') as f:
+    w = csv.writer(f)
+    w.writerow(['SubscriptionName::ResourceGroup','Count'])
+    for k,c in sorted(by_rg.items(), key=lambda x: (-x[1], x[0])):
+        w.writerow([k,c])
+PY
+
+# ---- final output ----
+{
+  echo ""
+  echo "Done."
+  echo "Location:          $LOCATION"
+  echo "Resources found:   $TOTAL"
+  echo "Inventory CSV:     $INV_CSV"
+  echo "Type summary CSV:  $TYPE_SUMMARY_CSV"
+  echo "RG summary CSV:    $RG_SUMMARY_CSV"
+} >&2
+BASH
+
+chmod +x az_region_inventory.sh
