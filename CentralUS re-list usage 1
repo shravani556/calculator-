@@ -1,4 +1,4 @@
-cat > az_region_inventory.sh <<'BASH'
+cat > az_region_inventory_v2.sh <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -9,57 +9,64 @@ SUB_LIST=""
 
 usage() {
   cat <<'EOF'
-Usage: az_region_inventory.sh [options]
+Usage: az_region_inventory_v2.sh [options]
 
-Creates a review spreadsheet (CSV) of every Azure resource in a given region.
+Exports a CSV inventory of all resources in a region (e.g., centralus),
+plus type and RG summaries. Adds debugging output so you can see counts.
 
 Options:
-  -l, --location <loc>     Azure location (default: centralus)
+  -l, --location <loc>     Location (default: centralus). Examples: centralus, "Central US", "Central US Region"
   -o, --outdir <dir>       Output directory (default: .)
   -a, --all-subs           Scan all enabled subscriptions you can access
   -s, --subs <id1,id2,..>  Scan only these subscription IDs (comma-separated)
   -h, --help               Show help
 
 Examples:
-  ./az_region_inventory.sh -l centralus
-  ./az_region_inventory.sh -l centralus -a
-  ./az_region_inventory.sh -l centralus -s "00000000-0000-0000-0000-000000000000,11111111-1111-1111-1111-111111111111"
+  ./az_region_inventory_v2.sh -l centralus
+  ./az_region_inventory_v2.sh -l "Central US Region" -a
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -l|--location)
-      LOCATION="${2:-}"; shift 2 ;;
-    -o|--outdir)
-      OUTDIR="${2:-}"; shift 2 ;;
-    -a|--all-subs)
-      SUBS_MODE="all"; shift ;;
-    -s|--subs)
-      SUBS_MODE="list"; SUB_LIST="${2:-}"; shift 2 ;;
-    -h|--help)
-      usage; exit 0 ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage
-      exit 1 ;;
+    -l|--location) LOCATION="${2:-}"; shift 2 ;;
+    -o|--outdir) OUTDIR="${2:-}"; shift 2 ;;
+    -a|--all-subs) SUBS_MODE="all"; shift ;;
+    -s|--subs) SUBS_MODE="list"; SUB_LIST="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
 done
 
-# ---- prereqs ----
-command -v az >/dev/null 2>&1 || { echo "ERROR: Azure CLI (az) not found." >&2; exit 1; }
+command -v az >/dev/null 2>&1 || { echo "ERROR: az not found." >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq not found." >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found." >&2; exit 1; }
 
+normalize_loc() {
+  # Normalize user inputs like:
+  # "Central US" -> centralus
+  # "Central US Region" -> centralus
+  # "centralus" -> centralus
+  echo "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+//g; s/region$//'
+}
+
+LOC_NORM="$(normalize_loc "$LOCATION")"
+if [[ -z "$LOC_NORM" ]]; then
+  echo "ERROR: Location is empty after normalization. Input was: '$LOCATION'" >&2
+  exit 1
+fi
+
 mkdir -p "$OUTDIR"
-
 TS="$(date -u +"%Y%m%dT%H%M%SZ")"
-SAFE_LOC="$(echo "$LOCATION" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')"
-INV_CSV="$OUTDIR/${SAFE_LOC}_resource_inventory_${TS}.csv"
-TYPE_SUMMARY_CSV="$OUTDIR/${SAFE_LOC}_resource_type_summary_${TS}.csv"
-RG_SUMMARY_CSV="$OUTDIR/${SAFE_LOC}_resourcegroup_summary_${TS}.csv"
+INV_CSV="$OUTDIR/${LOC_NORM}_resource_inventory_${TS}.csv"
+TYPE_SUMMARY_CSV="$OUTDIR/${LOC_NORM}_resource_type_summary_${TS}.csv"
+RG_SUMMARY_CSV="$OUTDIR/${LOC_NORM}_resourcegroup_summary_${TS}.csv"
 
-# ---- subscription selection ----
+echo "Using location input:        '$LOCATION'" >&2
+echo "Using normalized location:   '$LOC_NORM' (this is what resources are matched against)" >&2
+
 declare -a SUB_IDS=()
 if [[ "$SUBS_MODE" == "current" ]]; then
   SUB_IDS=("$(az account show --query id -o tsv)")
@@ -69,32 +76,44 @@ else
   mapfile -t SUB_IDS < <(az account list --query "[?state=='Enabled'].id" -o tsv)
 fi
 
-# Build a subscriptionId -> name map (best-effort)
 declare -A SUB_NAME=()
 while IFS=$'\t' read -r sid sname; do
   SUB_NAME["$sid"]="$sname"
 done < <(az account list --query "[?state=='Enabled'].[id,name]" -o tsv)
 
-# ---- write inventory header ----
 cat > "$INV_CSV" <<'CSV'
 SubscriptionName,SubscriptionId,ResourceGroup,Name,Type,Location,Kind,Sku,ProvisioningState,Tags,Id,PortalUrl,Decision,Owner,Application,Environment,Notes
 CSV
 
-TOTAL=0
+TOTAL_MATCHED=0
 
 for sid in "${SUB_IDS[@]}"; do
-  sid="$(echo "$sid" | xargs)"   # trim
+  sid="$(echo "$sid" | xargs)"
   [[ -z "$sid" ]] && continue
 
   sname="${SUB_NAME[$sid]:-$sid}"
-  echo "==> Scanning subscription: $sname ($sid)" >&2
+  echo "==> Subscription: $sname ($sid)" >&2
 
-  # Note: az resource list returns ALL resources; filtering is done client-side by jq.
   json="$(az resource list --subscription "$sid" -o json)"
+  total_in_sub="$(echo "$json" | jq 'length')"
 
-  # Append matching resources (case-insensitive, ignores whitespace)
-  echo "$json" | jq --arg loc "$LOCATION" --arg sid "$sid" --arg sname "$sname" -r '
-    def norm: ascii_downcase | gsub("\\s+";"");
+  matched_in_sub="$(echo "$json" | jq --arg loc "$LOC_NORM" '
+    def norm: (ascii_downcase | gsub("[^a-z0-9]+";""));
+    [ .[] | select((.location // "" | norm) == ($loc | norm)) ] | length
+  ')"
+
+  echo "    Total resources visible: $total_in_sub" >&2
+  echo "    Matched in region:       $matched_in_sub" >&2
+
+  # Helpful: if matched=0, show distinct locations seen (top ~25)
+  if [[ "$matched_in_sub" -eq 0 && "$total_in_sub" -gt 0 ]]; then
+    echo "    (No matches) sample locations in this subscription:" >&2
+    echo "$json" | jq -r '[.[].location] | map(select(.!=null and .!="")) | unique | .[0:25] | .[]' 2>/dev/null \
+      | sed 's/^/      - /' >&2 || true
+  fi
+
+  echo "$json" | jq --arg loc "$LOC_NORM" --arg sid "$sid" --arg sname "$sname" -r '
+    def norm: (ascii_downcase | gsub("[^a-z0-9]+";""));
     .[]
     | select((.location // "" | norm) == ($loc | norm))
     | [
@@ -114,14 +133,9 @@ for sid in "${SUB_IDS[@]}"; do
       ] | @csv
   ' >> "$INV_CSV"
 
-  c="$(echo "$json" | jq --arg loc "$LOCATION" -r '
-    def norm: ascii_downcase | gsub("\\s+";"");
-    [ .[] | select((.location // "" | norm) == ($loc | norm)) ] | length
-  ')"
-  TOTAL=$((TOTAL + c))
+  TOTAL_MATCHED=$((TOTAL_MATCHED + matched_in_sub))
 done
 
-# ---- summaries (robust CSV parsing via Python) ----
 python3 - "$INV_CSV" "$TYPE_SUMMARY_CSV" "$RG_SUMMARY_CSV" <<'PY'
 import csv, collections, sys
 inv, out_type, out_rg = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -132,7 +146,8 @@ by_rg = collections.Counter()
 with open(inv, newline='', encoding='utf-8') as f:
     r = csv.DictReader(f)
     for row in r:
-        by_type[row.get('Type','')] += 1
+        t = row.get('Type','') or ''
+        by_type[t] += 1
         rg_key = f"{row.get('SubscriptionName','')}::{row.get('ResourceGroup','')}"
         by_rg[rg_key] += 1
 
@@ -140,25 +155,27 @@ with open(out_type, 'w', newline='', encoding='utf-8') as f:
     w = csv.writer(f)
     w.writerow(['Type','Count'])
     for t,c in sorted(by_type.items(), key=lambda x: (-x[1], x[0])):
-        w.writerow([t,c])
+        if t:
+            w.writerow([t,c])
 
 with open(out_rg, 'w', newline='', encoding='utf-8') as f:
     w = csv.writer(f)
     w.writerow(['SubscriptionName::ResourceGroup','Count'])
     for k,c in sorted(by_rg.items(), key=lambda x: (-x[1], x[0])):
         w.writerow([k,c])
+
+print("Inventory rows (incl header):", sum(1 for _ in open(inv, encoding='utf-8')))
 PY
 
-# ---- final output ----
-{
-  echo ""
-  echo "Done."
-  echo "Location:          $LOCATION"
-  echo "Resources found:   $TOTAL"
-  echo "Inventory CSV:     $INV_CSV"
-  echo "Type summary CSV:  $TYPE_SUMMARY_CSV"
-  echo "RG summary CSV:    $RG_SUMMARY_CSV"
-} >&2
+echo "" >&2
+echo "DONE." >&2
+echo "Matched resources total: $TOTAL_MATCHED" >&2
+echo "Inventory CSV:          $INV_CSV" >&2
+echo "Type summary CSV:       $TYPE_SUMMARY_CSV" >&2
+echo "RG summary CSV:         $RG_SUMMARY_CSV" >&2
+echo "" >&2
+echo "Preview (first 5 lines):" >&2
+head -n 5 "$INV_CSV" >&2 || true
 BASH
 
-chmod +x az_region_inventory.sh
+chmod +x az_region_inventory_v2.sh
