@@ -1,0 +1,24 @@
+A) Quick sanity checks (run these first)
+1) Confirm you’re in Bash Cloud Shell
+echo "$SHELL"
+
+You want /bin/bash.
+If you see PowerShell/pwsh, switch Cloud Shell to Bash (top-left selector) or type bash to enter a bash session.
+
+2) Confirm current subscription (this is the #1 cause)
+az account show -o table
+az account list -o table | head
+3) Prove whether Central US resources exist in this subscription
+az resource list --query "[?location=='centralus'] | length(@)" -o tsv
+
+If that prints 0, then either:
+
+resources are in a different subscription → run the script with -a (all subs), OR
+
+your resources aren’t actually in centralus → list distinct locations:
+
+az resource list --query "[?location!=null].location" -o tsv | sed '/^$/d' | sort -u
+
+Also, verify the official location name:
+
+az account list-locations --query "[?displayName=='Central US'].[name,displayName]" -o tabl
