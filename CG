@@ -1,3 +1,18 @@
+Hi Benny,
+
+As part of the Azure cleanup activity for the Central US region (as per the Jira task), we have extracted the list of resources currently present in this region and attached it for your reference.
+
+Could you please review the attached list and confirm which resources need to be retained and which can be considered for deletion? This will help us ensure that no active or required resources are removed during the cleanup process.
+
+Once we receive your confirmation, we will proceed with updating the spreadsheet accordingly and take the next steps for the cleanup.
+
+Please let me know if you need any additional information.
+
+Thanks,
+Shravani
+
+
+
 - name: Import missing resources (associations/diag/flowlog/hub)
   shell: bash
   run: |
