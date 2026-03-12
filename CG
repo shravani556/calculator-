@@ -1,5 +1,19 @@
 Hi Benny,
 
+Just following up on the email regarding the Central US region cleanup.
+
+We had shared the list of resources for your review and validation. Could you please take a look and confirm which resources need to be retained and which can be considered for deletion?
+
+Your confirmation will help us proceed further with the cleanup activity as per the Jira task.
+
+Please let us know if you need any additional details.
+
+Thanks,
+Shravani
+
+
+Hi Benny,
+
 As part of the Azure cleanup activity for the Central US region (as per the Jira task), we have extracted the list of resources currently present in this region and attached it for your reference.
 
 Could you please review the attached list and confirm which resources need to be retained and which can be considered for deletion? This will help us ensure that no active or required resources are removed during the cleanup process.
