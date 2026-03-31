@@ -1,3 +1,7 @@
+The failure is due to the Azure cleanup step (az logout) where no active session was found. This is not impacting the actual deployment. We will update the cleanup step to handle this scenario and avoid job failure.
+
+
+
 - name: Check RG tfvars
   id: check_rg_tfvars
   run: |
