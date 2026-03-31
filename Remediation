@@ -1,3 +1,32 @@
+- name: Check RG tfvars
+  id: check_rg_tfvars
+  run: |
+    printf "\nJOB STATUS: CHECKING RG NAME FROM TFVARS\n---------------------------------------\n"
+    grep -Ei 'resource_group_name|rg_name|namespace' ./environments/dev/dev.tfvars || true
+  working-directory: ./workload
+
+- name: Check RG from terraform state
+  id: check_rg_state
+  run: |
+    printf "\nJOB STATUS: CHECKING RG NAME FROM TERRAFORM STATE\n------------------------------------------------\n"
+    terraform init
+    terraform state show azurerm_resource_group.namespace || echo "RG not found in state"
+  working-directory: ./workload
+
+- name: Ensure Terraform Target RG + Role Destroy Plan Only
+  id: terraform_target_rg_role_destroy_plan
+  run: |
+    printf "\nJOB STATUS: TARGET RG + ROLE DESTROY PLAN STARTING\n-------------------------------------------------\n"
+    terraform init
+    terraform plan -destroy \
+      -target="azurerm_role_assignment.rg_owner" \
+      -target="azurerm_resource_group.namespace" \
+      -var-file="./environments/dev/dev.tfvars"
+  working-directory: ./workload
+
+
+
+
 - name: Terraform initialization
   run: terraform init
   working-directory: ./infrastructure/network
