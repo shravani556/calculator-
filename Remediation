@@ -1,3 +1,24 @@
+- name: Terraform initialization
+  run: terraform init
+  working-directory: ./infrastructure/network
+
+- name: Terraform state list
+  run: terraform state list
+  working-directory: ./infrastructure/network
+
+- name: Check SPNs in terraform state
+  run: |
+    terraform state list | grep -Ei 'azuread|service_principal|application_password|application' || true
+  working-directory: ./infrastructure/network
+
+- name: Pull state and search a00011 / azuread entries
+  run: |
+    terraform state pull > tfstate.json
+    grep -Ei 'a00011|azuread|service_principal|application_password|application' tfstate.json || true
+  working-directory: ./infrastructure/network
+
+
+
 - name: Verify state list after cleanup
   working-directory: nasuni
   run: terraform state list
