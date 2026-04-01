@@ -1,3 +1,9 @@
+Terraform plan is failing with 403 Authorization error.  
+OIDC login is successful but Service Principal does not have required RBAC permissions on subscription.  
+Need Contributor/Reader role assignment to proceed.
+
+
+
 OIDC login failure identified due to missing federated credential for CTDEV environment. Requires update in Azure App Registration. I do not have access to validate or modify the configuration.
 
 The failure is due to the Azure cleanup step (az logout) where no active session was found. This is not impacting the actual deployment. We will update the cleanup step to handle this scenario and avoid job failure.
