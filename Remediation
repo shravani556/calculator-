@@ -1,3 +1,16 @@
+
+
+
+- name: Terraform Plan destroy (full infra)
+  id: terraform_plan_destroy
+  run: |
+    echo "===== FULL DESTROY PLAN ====="
+
+    terraform plan -destroy \
+    -var-file="./environments/qa/qa.tfvars"
+
+    echo "===== END PLAN ====="
+
 Terraform plan is failing with 403 Authorization error.  
 OIDC login is successful but Service Principal does not have required RBAC permissions on subscription.  
 Need Contributor/Reader role assignment to proceed.
