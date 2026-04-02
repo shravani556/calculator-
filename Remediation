@@ -1,4 +1,8 @@
-
+- name: Terraform destroy plan for only RG
+  run: |
+    terraform plan -destroy \
+      -target='azurerm_resource_group.namespace' \
+      -var-file="./environments/dev/dev2.tfvars"
 
 
 - name: Terraform Plan destroy (full infra)
