@@ -1,3 +1,52 @@
+Yes — I remember your Jira and changes 👍
+This is a safe config update (KV name change for SPN in workflows & Octopus), so your CMR should reflect low risk, no infra change.
+Here is ready-to-paste content for each field 👇
+✅ Implementation Plan
+
+1. Update SPN Key Vault names in GitHub workflows and Octopus variables as per Jira MSAZ-14007.
+2. Raise PR and validate changes via Terraform plan in CI pipeline.
+3. Verify that only configuration (KV name references) is updated and no unintended infrastructure changes are present.
+4. Merge PR after approval.
+5. Trigger deployment pipeline to apply updated configuration.
+6. Monitor pipeline execution and validate successful completion.
+✅ Risk and Impact Analysis
+
+Services affected:
+- Azure Workload deployments using SPN authentication
+- GitHub Actions workflows and Octopus deployment variables
+
+Who is impacted:
+- DevOps pipelines and deployment processes
+- No direct impact to end users or business applications
+
+Impact during change:
+- No downtime expected
+- No impact to running services
+- Changes are limited to configuration updates (Key Vault name references)
+
+Overall Risk:
+- Low risk change (non-infrastructure, configuration-only update)
+✅ Backout Plan
+
+1. Revert the PR changes to previous Key Vault names.
+2. Re-run the pipeline with previous configuration.
+3. Validate that deployments are working as before.
+✅ Test Plan
+
+1. Validate Terraform plan shows only expected configuration updates.
+2. Ensure pipelines run successfully after changes.
+3. Verify SPN authentication using updated Key Vault references.
+4. Confirm no failures in deployment workflows.
+💡 Important (you can say if asked)
+Terraform plan shows only tag/config updates, no infra creation/deletion (safe)
+This change is Jira-aligned
+Your apply failure (DES key issue) is separate issue, not part of this CMR
+If you want, I can also give you 1-line justification correction (slightly better wording for approval).
+
+
+
+
+
 - name: Terraform destroy plan for only RG
   run: |
     terraform plan -destroy \
