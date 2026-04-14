@@ -1,3 +1,8 @@
+Here’s a crisp Jira comment you can use 👇
+Terraform destroy plan is failing during Resource Provider validation for the azurerm.app-sub provider (versions.tf line ~22). Although skip_provider_registration was added to other providers, the same is missing in the app-sub provider block.
+Proposed fix: add skip_provider_registration = true to the azurerm provider with alias app-sub to avoid provider registration checks due to limited SPN permissions.
+
+
 Yes — I remember your Jira and changes 👍
 This is a safe config update (KV name change for SPN in workflows & Octopus), so your CMR should reflect low risk, no infra change.
 Here is ready-to-paste content for each field 👇
