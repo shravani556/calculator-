@@ -1,3 +1,10 @@
+Discussed with Jagadeesh regarding Storage Account Shared Access Key disablement.
+Based on the discussion, application authentication needs to be updated from Shared Access Key–based authentication to Managed Identity authentication using "DefaultAzureCredential()" and "BlobServiceClient".
+
+Necessary RBAC roles for Blob/File/Queue/Table access need to be configured from Jagadeesh’s end for the respective Function App/App Service Managed Identity before disabling Shared Access Keys.
+
+
+
 Here’s a crisp Jira comment you can use 👇
 Terraform destroy plan is failing during Resource Provider validation for the azurerm.app-sub provider (versions.tf line ~22). Although skip_provider_registration was added to other providers, the same is missing in the app-sub provider block.
 Proposed fix: add skip_provider_registration = true to the azurerm provider with alias app-sub to avoid provider registration checks due to limited SPN permissions.
