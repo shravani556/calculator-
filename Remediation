@@ -1,3 +1,36 @@
+Short Description
+Disable Shared Access Keys on Azure Storage Accounts as part of MSFT Defender High remediation activity.
+Description
+As part of MSFT Defender High remediation activity, Shared Access Keys will be disabled on the storage account.
+Application team confirmed that there are no active application dependencies on Shared Access Keys.
+Applications are authenticated through Okta access tokens via APIM.
+Future storage integrations will use Service Principal / Azure AD based authentication.
+Justification
+This change is required to improve security compliance and align with Microsoft Defender recommendations.
+Disabling Shared Access Keys reduces unauthorized access risks.
+The application team confirmed no active usage of Shared Key authentication.
+Secure token-based authentication will be used for future integrations.
+Implementation Plan
+Validate the current storage account configuration and application dependencies.
+Disable Shared Access Keys on the Azure Storage Account through Azure Portal/Terraform.
+Verify the configuration changes after implementation.
+Monitor application and storage account access post implementation.
+Risk and Impact Analysis
+No major impact is expected as there are no active application integrations using Shared Access Keys.
+Applications are already protected through Okta token authentication via APIM.
+Minimal impact is expected during the maintenance activity.
+Any unexpected access issues will be monitored and addressed immediately.
+Backout Plan
+Re-enable Shared Access Keys if any issue is identified after implementation.
+Validate storage account accessibility after rollback.
+Coordinate with application teams for troubleshooting if required.
+Continue monitoring after rollback completion.
+Test Plan
+Verify Shared Access Keys are disabled successfully in Azure portal.
+Validate storage account accessibility and authentication after implementation.
+Check logs for any connectivity or authentication failures.
+Obtain confirmation from application team after successful validation.
+
 Discussed with Jagadeesh regarding Storage Account Shared Access Key disablement.
 Based on the discussion, application authentication needs to be updated from Shared Access Key–based authentication to Managed Identity authentication using "DefaultAzureCredential()" and "BlobServiceClient".
 
