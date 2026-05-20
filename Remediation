@@ -1,3 +1,71 @@
+Terraform Plan Summary
+Plain text
+Plan: 24 to add, 10 to change, 0 to destroy
+Resources Being Added (24)
+RBAC Role Assignments Added
+Storage Blob Data Contributor
+Assigned to:
+windowsfuncapp1
+windowsfuncapp3
+linuxfuncapp1
+uaisql
+uacmkstorage
+uafnapp01
+uafnapp02
+uafnapp03
+uaappsvc01
+logged_in_user
+Storage Queue Data Contributor
+Assigned to:
+windowsfuncapp1
+windowsfuncapp3
+linuxfuncapp1
+uaisql
+uacmkstorage
+uafnapp01
+uafnapp02
+uafnapp03
+uaappsvc01
+logged_in_user
+Storage Table Data Contributor
+Assigned to:
+windowsfuncapp1
+windowsfuncapp3
+linuxfuncapp1
+uaisql
+uacmkstorage
+uafnapp01
+uafnapp02
+uafnapp03
+uaappsvc01
+logged_in_user
+Additional Terraform Resources Added
+Terraform helper resources:
+Plain text
+time_sleep.propagate_to_azuread
+These are added to wait for Azure AD RBAC propagation before continuing deployment.
+Resources Being Changed (10)
+Storage Account Authentication/Security Updates
+Updated settings include:
+YAML
+shared_access_key_enabled: false
+default_to_oauth_authentication: true
+Meaning:
+Shared Access Keys are disabled
+Azure AD / Managed Identity authentication is enabled
+Applications will use RBAC + Managed Identity instead of storage keys
+Final Outcome
+✅ RBAC access implemented for Function Apps/Web Apps/UAIs
+✅ Blob/Queue/Table permissions added
+✅ OAuth authentication enabled
+✅ Shared Access Keys disabled
+✅ No existing resources deleted
+Plain text
+0 to destroy
+
+
+
+
 Short Description
 Disable Shared Access Keys on Azure Storage Accounts as part of MSFT Defender High remediation activity.
 Description
