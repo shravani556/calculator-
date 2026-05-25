@@ -1,3 +1,8 @@
+git add .gitmodules
+git commit -m "Added missing submodule mapping"
+git push
+
+
 [submodule "service_principals/modules/Terraform_AzureAD_ServicePrincipals"]
     path = service_principals/modules/Terraform_AzureAD_ServicePrincipals
     url = https://github.com/FisherInvestments/Terraform_AzureAD_ServicePrincipals.git
