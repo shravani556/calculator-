@@ -1,3 +1,9 @@
+[submodule "service_principals/modules/Terraform_AzureAD_ServicePrincipals"]
+    path = service_principals/modules/Terraform_AzureAD_ServicePrincipals
+    url = https://github.com/FisherInvestments/Terraform_AzureAD_ServicePrincipals.git
+
+
+
 git clone https://github.com/FisherInvestments/Terraform_AzureAD_ServicePrincipals.git infrastructure_service_principals_lz
 
 
