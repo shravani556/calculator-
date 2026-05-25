@@ -1,3 +1,7 @@
+git clone https://github.com/FisherInvestments/Terraform_AzureAD_ServicePrincipals.git infrastructure_service_principals_lz
+
+
+
 Terraform Plan Summary
 Plain text
 Plan: 24 to add, 10 to change, 0 to destroy
