@@ -1,3 +1,8 @@
+git add modules/service_principals/infrastructure_service_principals_lz/versions.tf
+git commit -m "Update Terraform version constraint for service principal module"
+git push
+
+
 git add .gitmodules
 git commit -m "Added missing submodule mapping"
 git push
