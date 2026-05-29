@@ -1,3 +1,78 @@
+ra_fnapp_storage_blob_data_contrib:
+  scope: "storage"
+  scope_key: "functapp_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Blob Data Contributor":
+      managed_identity_keys:
+        identity_key: "uaappsvc01"
+
+ra_fnapp_storage_queue_data_contrib:
+  scope: "storage"
+  scope_key: "functapp_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Queue Data Contributor":
+      managed_identity_keys:
+        identity_key: "uafnapp01"
+        identity_key1: "uafnapp02"
+        identity_key2: "uafnapp03"
+        identity_key3: "uaappsvc01"
+
+ra_fnapp_storage_table_data_contrib:
+  scope: "storage"
+  scope_key: "functapp_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Table Data Contributor":
+      managed_identity_keys:
+        identity_key: "uafnapp01"
+        identity_key1: "uafnapp02"
+        identity_key2: "uafnapp03"
+        identity_key3: "uaappsvc01"
+
+ra_gen_storage_blob_data_contrib:
+  scope: "storage"
+  scope_key: "general_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Blob Data Contributor":
+      managed_identity_keys:
+        identity_key: "uaappsvc01"
+
+ra_gen_storage_queue_data_contrib:
+  scope: "storage"
+  scope_key: "general_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Queue Data Contributor":
+      managed_identity_keys:
+        identity_key: "uafnapp01"
+        identity_key1: "uafnapp02"
+        identity_key2: "uafnapp03"
+        identity_key3: "uaappsvc01"
+
+ra_gen_storage_table_data_contrib:
+  scope: "storage"
+  scope_key: "general_storage"
+  mode: "built-in"
+  enabled: true
+  role_mappings:
+    "Storage Table Data Contributor":
+      managed_identity_keys:
+        identity_key: "uafnapp01"
+        identity_key1: "uafnapp02"
+        identity_key2: "uafnapp03"
+        identity_key3: "uaappsvc01"
+
+
+
+
 git add modules/service_principals/Terraform_AzureAD_ServicePrincipals/infrastructure_service_principals_lz/versions.tf
 
 
