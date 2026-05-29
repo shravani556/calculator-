@@ -1,3 +1,22 @@
+Tell Jagadeesh:
+Hi Jagadeesh, current SIT plan is not only RBAC for the requested UAIs.
+Plan shows: 1 to add, 4 to change, 0 to destroy
+Changes showing:
+Storage account a00029stgen01r01s
+shared_access_key_enabled: true -> false
+default_to_oauth_authentication: false -> true
+One RBAC add
+Role: Storage Blob Data Contributor
+Principal: logged_in_user
+Scope: resource group a00029-rg1-r01-s
+Other changes
+Certificate/tag updates
+Cosmos DB indexing policy update
+I don’t see the requested RBACs for the 4 Function/Web App UAIs in this plan, so I’ll not apply until we confirm.
+
+
+
+
 You can send something like this to Jagadeesh:
 Hi Jagadeesh,
 I reverted the code changes and reran the Terraform plan. However, the plan is still failing with:
